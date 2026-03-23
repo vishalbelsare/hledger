@@ -4,16 +4,20 @@
 // STARTUP
 
 $(document).ready(function() {
+
+  // add form helpers XXX move to addForm ?
+
   // date picker
   // http://bootstrap-datepicker.readthedocs.io/en/latest/options.html
   var dateEl = $('#dateWrap').datepicker({
     showOnFocus: false,
     autoclose: true,
     format: 'yyyy-mm-dd',
+    todayHighlight: true,
     weekStart: 1 // Monday
   });;
 
-  // ensure add form always focuses its first field
+  // focus and pre-fill the add form whenever it is shown
   $('#addmodal')
     .on('shown.bs.modal', function() {
       addformFocus();
@@ -54,86 +58,6 @@ $(document).ready(function() {
 });
 
 //----------------------------------------------------------------------
-// REGISTER CHART
-
-//eslint-disable-next-line no-unused-vars
-function registerChart($container, series) {
-  // https://github.com/flot/flot/blob/master/API.md
-  return $container.plot(
-    series,
-    { /* general chart options */
-      xaxis: {
-        mode: "time",
-        timeformat: "%Y/%m/%d",
-      },
-      selection: {
-        mode: "x"
-      },
-      legend: {
-        position: 'sw'
-      },
-      grid: {
-        markings: function () {
-          var now = Date.now();
-          return [
-            {
-              xaxis: { to: now }, // past
-              yaxis: { to: 0 },   // <0
-              color: '#ffdddd',
-            },
-            {
-              xaxis: { from: now }, // future
-              yaxis: { from: 0 },   // >0
-              color: '#e0e0e0',
-            },
-            {
-              xaxis: { from: now }, // future
-              yaxis: { to: 0 },     // <0
-              color: '#e8c8c8',
-            },
-            {
-              yaxis: { from: 0, to: 0 }, // =0
-              color: '#bb0000',
-              lineWidth:1
-            },
-          ];
-        },
-        hoverable: true,
-        autoHighlight: true,
-        clickable: true,
-      },
-      /* https://github.com/krzysu/flot.tooltip */
-      tooltip: true,
-      tooltipOpts: {
-        xDateFormat: "%Y/%m/%d",
-        content:
-          function(label, x, y, flotitem) {
-            var data = flotitem.series.data[flotitem.dataIndex];
-            return data[3]+" balance on %x after "+data[2]+" posted by transaction:<pre>"+data[4]+"</pre>";
-          },
-        onHover: function(flotitem, $tooltipel) {
-          $tooltipel.css('border-color',flotitem.series.color);
-        },
-      },
-    }
-  ).data("plot");
-}
-
-function registerChartClick(ev, pos, item) {
-  if (!item) {
-    return;
-  }
-  var targetselector = '#' + item.series.data[item.dataIndex][5];
-  var $target = $(targetselector);
-  if ($target.length) {
-    window.location.hash = targetselector;
-    $('html, body').animate({
-      scrollTop: $target.offset().top
-    }, 1000);
-  }
-}
-
-//----------------------------------------------------------------------
 // ADD FORM
 
 function addformShow(showmsg) {
@@ -159,13 +83,18 @@ function addformReset(showmsg) {
 // Set the add-new-row-on-keypress handler on the add form's current last amount field, only.
 // (NB: removes all other keypress handlers from all amount fields).
 function addformLastAmountBindKey() {
-  $('.amount-input').off('keypress');
-  $('.amount-input:last').keypress(addformAddPosting);
+  $('input[name=amount]').off('keypress');
+  $('input[name=amount]:last').keypress(addformAddPosting);
 }
 
-// Focus the first add form field.
+// Pre-fill today's date and focus the description field in the add form.
 function addformFocus() {
-  focus($('#addform input#date'));
+  $('#addform input[name=date]').val(isoDate());
+  focus($('#addform input[name=description]'));
+}
+
+function isoDate() {
+  return new Date().toLocaleDateString("sv");  // https://stackoverflow.com/a/58633651/84401
 }
 
 // Focus a jquery-wrapped element, working around http://stackoverflow.com/a/7046837.
@@ -177,16 +106,29 @@ function focus($el) {
 
 // Insert another posting row in the add form.
 function addformAddPosting() {
-  if (!$('#addform').is(':visible')) {
-    return;
-  }
-  // Clone the old last row to make a new last row
-  $('#addform .account-postings').append( $('#addform .account-group:last').clone().addClass('added-row') );
-  // renumber and clear the new last account and amount fields
-  var n = $('#addform .account-group').length;
-  $('.account-input:last').prop('placeholder', 'Account '+n).val('');
-  $('.amount-input:last').prop('placeholder','Amount '+n).val('');  // XXX Enable typehead on dynamically created inputs
-  // and move the keypress handler to the new last amount field
+  if (!$('#addform').is(':visible')) { return; }
+
+  // Clone the last row.
+  var newrow = $('#addform .account-group:last').clone().addClass('added-row');
+  var newnum = $('#addform .account-group').length + 1;
+
+  // Clear the new account and amount fields and update their placeholder text.
+  var accountfield = newrow.find('input[name=account]');
+  var amountfield  = newrow.find('input[name=amount]');
+  accountfield.val('').prop('placeholder', 'Account '+newnum);
+  amountfield.val('').prop('placeholder', 'Amount '+newnum);
+
+  // Enable autocomplete in the new account field.
+  // We must first remove these typehead helper elements cloned from the old row,
+  // or it will recursively add helper elements for those, causing confusion (#2215).
+  newrow.find('.tt-hint').remove();
+  newrow.find('.tt-input').removeClass('tt-input');
+  accountfield.typeahead({ highlight: true }, { source: globalThis.accountsCompleter.ttAdapter() });
+
+  // Add the new row to the page.
+  $('#addform .account-postings').append(newrow);
+
+  // And move the keypress handler to the new last amount field.
   addformLastAmountBindKey();
 }
 

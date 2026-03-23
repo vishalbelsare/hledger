@@ -1,0 +1,176 @@
+# TRIGGER: Runs on any push to binaries-mac-arm64 or binaries branches.
+# ACTION: Builds, tests and saves mac arm64 dynamic binaries with stack and the default ghc.
+
+name: binaries-mac-arm64
+on:
+  push:
+    branches: [ binaries-mac-arm64, binaries ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+      # arch:  arm64
+      # image: https://github.com/actions/runner-images/blob/main/images/macos/macos-14-Readme.md
+
+    env:
+      stack: stack
+      ghcid: 9.12.2
+
+    steps:
+
+    - name: Show platform info
+      run: |
+        arch
+        uname -a
+
+    - name: Check out
+      uses: actions/checkout@v4
+      # have to fetch everything for git describe for --version
+      with: 
+        fetch-depth: 0        
+
+    - name: Check embedded files
+      run: |
+        tools/checkembeddedfiles
+
+    # CACHES
+
+    - name: Cache - stack-installed ~/.local/bin
+      id:   stack-programs
+      uses: actions/cache@v4
+      with:
+        path: ~/.local/bin
+        key: ${{ runner.os }}-arm64-stack-programs-${{ env.ghcid }}-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-stack-programs-${{ env.ghcid }}
+
+    - name: Cache - ~/.stack
+      id:   stack-global
+      uses: actions/cache@v4
+      with:
+        path: ~/.stack
+        key: ${{ runner.os }}-arm64-stack-global-${{ env.ghcid }}-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-stack-global-${{ env.ghcid }}
+
+    - name: Cache - ./.stack-work
+      uses: actions/cache@v4
+      with:
+        path: .stack-work
+        key: ${{ runner.os }}-arm64-stack-work-${{ env.ghcid }}-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-stack-work-${{ env.ghcid }}
+
+    - name: Cache - hledger-lib/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-lib/.stack-work
+        key: ${{ runner.os }}-arm64-hledger-lib-stack-work-${{ env.ghcid }}-${{ hashFiles('hledger-lib/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-hledger-lib-stack-work-${{ env.ghcid }}
+
+    - name: Cache - hledger/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger/.stack-work
+        key: ${{ runner.os }}-arm64-hledger-stack-work-${{ env.ghcid }}-${{ hashFiles('hledger/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-hledger-stack-work-${{ env.ghcid }}
+
+    - name: Cache - hledger-ui/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-ui/.stack-work
+        key: ${{ runner.os }}-arm64-hledger-ui-stack-work-${{ env.ghcid }}-${{ hashFiles('hledger-ui/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-hledger-ui-stack-work-${{ env.ghcid }}
+
+    - name: Cache - hledger-web/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-web/.stack-work
+        key: ${{ runner.os }}-arm64-hledger-web-stack-work-${{ env.ghcid }}-${{ hashFiles('hledger-web/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-arm64-hledger-web-stack-work-${{ env.ghcid }}
+
+    # actions:
+
+    - name: Ensure ~/.local/bin exists and is in PATH
+      run: |
+        mkdir -p "$HOME/.local/bin"
+        echo "$HOME/.local/bin/" >> $GITHUB_PATH
+
+    - name: Install haskell tools if needed
+      run: |
+        if [[ ! -x ~/.local/bin/stack ]]; then curl -sL https://get.haskellstack.org/stable/osx-aarch64.tar.gz | gtar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'; chmod a+x ~/.local/bin/stack; fi
+        stack --version
+        $stack setup --install-ghc --verbosity=error
+
+    - name: Install haskell deps
+      run: |
+        $stack build --test --only-dependencies --verbosity=error
+
+    - name: List dep versions
+      run: |
+        $stack exec -- ghc-pkg list
+
+    - name: Build hledger and test unit tests, doc tests
+      run: |
+        $stack install --test --force-dirty --ghc-options=-fforce-recomp --ghc-options=-Werror
+        # --ghc-options=-split-sections doesn't work on mac
+        #  --pedantic
+
+    - name: Install shelltestrunner
+      run: |
+        export PATH=~/.local/bin:$PATH
+        # $stack update;                             $stack install --verbosity=error shelltestrunner-1.11
+        if [[ ! -x ~/.local/bin/shelltest ]]; then $stack install --verbosity=error shelltestrunner-1.11; fi
+        shelltest --version
+
+    - name: Test functional tests (excluding addons)
+      run: |
+        export PATH=~/.local/bin:$PATH
+        COLUMNS=80 $stack exec -- shelltest --execdir -j16 hledger/test -x /_ -x /addons -x ledger-compat/ledger-baseline -x ledger-compat/ledger-regress -x ledger-compat/ledger-collected # bin
+
+    # This is tested here rather than in the regular CI because it's slow,
+    # doesn't fail too often, and the cost of late detection and fixing is low.
+    - name: Test haddock generation
+      run: |
+        printf "haddock: "; stack exec -- haddock --version
+        time $stack build --fast --haddock --no-haddock-deps --no-haddock-hyperlink-source --haddock-arguments="--no-print-missing-docs"
+        # --no-haddock-hyperlink-source is 25% faster
+        # --no-print-missing-docs is 600% quieter
+
+    # artifacts:
+
+    - name: Gather binaries
+      run: |
+        mkdir tmp
+        cp ~/.local/bin/hledger tmp
+        cp ~/.local/bin/hledger-ui tmp
+        cp ~/.local/bin/hledger-web tmp
+        cp hledger/embeddedfiles/*.1 tmp
+        cp hledger/embeddedfiles/*.info tmp
+        cp hledger/shell-completion/hledger-completion.bash tmp
+        strip tmp/hledger
+        strip tmp/hledger-ui
+        strip tmp/hledger-web
+        cd tmp
+        gtar cvf hledger-mac-arm64.tar hledger hledger-ui hledger-web *.1 *.info hledger-completion.bash
+        otool -L hledger
+        otool -L hledger-ui
+        otool -L hledger-web
+        ./hledger --version
+        ./hledger-ui --version
+        ./hledger-web --version
+
+    # upload-artifact loses execute permissions, so we tar the binaries to preserve them.
+    # github UI always zips artifacts when they are downloaded, so we don't bother compressing the tar.
+    # https://github.com/actions/upload-artifact?tab=readme-ov-file#limitations
+    # In release workflows, we repack these using the platform's native compression scheme.
+    - name: Upload binaries artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: hledger-mac-arm64
+        path: tmp/hledger-mac-arm64.tar

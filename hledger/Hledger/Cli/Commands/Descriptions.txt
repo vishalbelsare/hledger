@@ -1,7 +1,9 @@
 descriptions
-List the unique descriptions that appear in transactions.
 
-_FLAGS
+List the unique descriptions used in transactions.
+
+Flags:
+no command-specific flags
 
 This command lists the unique descriptions that appear in transactions,
 in alphabetic order. You can add a query to select a subset of

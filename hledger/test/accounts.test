@@ -1,6 +1,6 @@
-# accounts command
+# * accounts command
 
-# basic accounts report
+# ** 1. basic accounts report
 <
 account a
 
@@ -10,26 +10,104 @@ account a
 $ hledger -f - accounts
 a
 a:aa
->=
 
-# tree mode
+# ** 2. tree mode
 $ hledger -f - accounts --tree
 a
   aa
->=
 
-# drop in flat mode
+# ** 3. drop in flat mode
 $ hledger -f - accounts --flat --drop 1
 ...
 aa
->=
-# drop in tree mode
+
+# ** 4. drop in tree mode
 $ hledger -f - accounts --tree --drop 1
 ...
 aa
->=
 
-# filtering transactions by tag
+# ** 5. filtering transactions by tag
 $ hledger -f - accounts tag:foo
 a:aa
->=
+
+# ** 6. Show account types.
+<
+account asset
+2022-01-01
+  (unknown)  1
+
+$ hledger -f - accounts --types
+asset      ; type: A
+unknown
+
+# ** 7. equity:conversion, and several other names, are detected as V/Conversion type by default.
+<
+account equity:conversion
+account equity:trade
+account equity:trades
+account equity:trading
+$ hledger -f- accounts --types
+equity:conversion    ; type: V
+equity:trade         ; type: V
+equity:trades        ; type: V
+equity:trading       ; type: V
+
+# ** 8. If any other account name is declared with V type, those default names become just ordinary equity accounts.
+<
+account trade  ; type: V
+account equity:conversion
+account equity:trade
+account equity:trades
+account equity:trading
+$ hledger -f- accounts --types
+trade                ; type: V
+equity:conversion    ; type: E
+equity:trade         ; type: E
+equity:trades        ; type: E
+equity:trading       ; type: E
+
+# ** 9. --infer-equity uses equity:conversion as its base account by default.
+<
+2024-01-01
+  a    1A
+  b   -1B
+
+$ hledger -f- accounts --infer-equity
+a
+b
+equity:conversion:A-B:A
+equity:conversion:A-B:B
+
+# ** 10. With a custom conversion account declared, --infer-equity uses that instead.
+<
+account trade  ; type:V
+
+2024-01-01
+  a    1A
+  b   -1B
+
+$ hledger -f- accounts --infer-equity
+trade
+trade:A-B:A
+trade:A-B:B
+a
+b
+
+# ** 11. When matching accounts found in postings, tag: only matches the account's tags,
+# not posting tags.
+<
+account a    ; a:, this account has tag a
+account a:b  ; b:, this account has tag b and inherited tag a
+
+2025-01-01
+    a     1
+    a:b   2
+    c    -3  ; p:, this posting has tag p
+
+$ hledger -f- accounts tag:b
+a:b
+
+# ** 12. tag: also matches tags inherited from parent accounts, currently.
+$ hledger -f- accounts tag:a
+a
+a:b

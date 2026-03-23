@@ -11,7 +11,7 @@ module Hledger.Web.Handler.AddR
   ) where
 
 import Data.Aeson.Types (Result(..))
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Network.HTTP.Types.Status (status400)
 import Text.Blaze.Html (preEscapedToHtml)
 import Yesod
@@ -30,17 +30,16 @@ getAddR = do
 postAddR :: Handler ()
 postAddR = do
   checkServerSideUiEnabled
-  VD{caps, j, today} <- getViewData
-  when (CapAdd `notElem` caps) (permissionDenied "Missing the 'add' capability")
+  VD{j, today} <- getViewData
+  require AddPermission
 
   ((res, view), enctype) <- runFormPost $ addForm j today
   case res of
-    FormSuccess res' -> do
-      let t = txnTieKnot res'
-      -- XXX(?) move into balanceTransaction
-      liftIO $ ensureJournalFileExists (journalFilePath j)
-      -- XXX why not journalAddTransaction ?
-      liftIO $ appendToJournalFileOrStdout (journalFilePath j) (showTransaction t)
+    FormSuccess (t,f) -> do
+      let t' = txnTieKnot t
+      liftIO $ do
+        ensureJournalFileExists f
+        appendToJournalFileOrStdout f (showTransaction t')
       setMessage "Transaction added."
       redirect JournalR
     FormMissing -> showForm view enctype
@@ -52,7 +51,7 @@ postAddR = do
       sendResponse =<< defaultLayout [whamlet|
         <h2>Add transaction
         <div .row style="margin-top:1em">
-          <form#addform.form.col-xs-12.col-md-8 method=post enctype=#{enctype}>
+          <form#addform.form.col-xs-12.col-sm-11 method=post enctype=#{enctype}>
             ^{view}
       |]
 
@@ -60,8 +59,8 @@ postAddR = do
 -- The web form handler above should probably use PUT as well.
 putAddR :: Handler RepJson
 putAddR = do
-  VD{caps, j, opts} <- getViewData
-  when (CapAdd `notElem` caps) (permissionDenied "Missing the 'add' capability")
+  VD{j, opts} <- getViewData
+  require AddPermission
 
   (r :: Result Transaction) <- parseCheckJsonBody
   case r of

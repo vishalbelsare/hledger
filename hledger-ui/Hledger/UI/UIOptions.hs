@@ -1,15 +1,14 @@
 {-# LANGUAGE CPP #-}
-{-|
+{-# LANGUAGE TemplateHaskell #-}
 
--}
-
-module Hledger.UI.UIOptions
-where
+module Hledger.UI.UIOptions where
 
 import Data.Default (def)
+import Data.Either (fromRight)
 import Data.List (intercalate)
-import qualified Data.Map as M
+import Data.Map qualified as M
 import Data.Maybe (fromMaybe)
+import GitHash (tGitInfoCwdTry)
 import Lens.Micro (set)
 import System.Environment (getArgs)
 
@@ -18,24 +17,43 @@ import Hledger.UI.Theme (themes, themeNames)
 
 -- cf Hledger.Cli.Version
 
-packageversion :: String
+packageversion :: PackageVersionString
+packageversion =
 #ifdef VERSION
-packageversion = VERSION
+  VERSION
 #else
-packageversion = ""
+  ""
 #endif
 
-progname :: String
+progname :: ProgramName
 progname = "hledger-ui"
 
+-- | Generate the version string for this program.
+-- The template haskell call is here rather than in Hledger.Cli.Version to avoid wasteful recompilation.
 prognameandversion :: String
-prognameandversion = versionStringForProgname progname
+prognameandversion =
+  versionStringWith
+  $$tGitInfoCwdTry
+#ifdef GHCDEBUG
+  True
+#else
+  False
+#endif
+  progname
+  packageversion
+
+binaryinfo :: HledgerBinaryInfo
+binaryinfo = fromRight nullbinaryinfo $ parseHledgerVersion prognameandversion
+
 
 uiflags = [
-  -- flagNone ["debug-ui"] (setboolopt "rules-file") "run with no terminal output, showing console"
    flagNone ["watch","w"] (setboolopt "watch") "watch for data and date changes and reload automatically"
   ,flagReq  ["theme"] (\s opts -> Right $ setopt "theme" s opts) "THEME" ("use this custom display theme ("++intercalate ", " themeNames++")")
-  ,flagReq  ["register"] (\s opts -> Right $ setopt "register" s opts) "ACCTREGEX" "start in the (first) matched account's register"
+  ,flagNone ["cash"] (setboolopt "cash") "start in: the cash accounts screen"
+  ,flagNone ["bs"] (setboolopt "bs") "start in: the balance sheet accounts screen"
+  ,flagNone ["is"] (setboolopt "is") "start in: the income statement accounts screen"
+  ,flagNone ["all"] (setboolopt "all") "start in: the all accounts screen"
+  ,flagReq  ["register"] (\s opts -> Right $ setopt "register" s opts) "ACCTREGEX" "start in: the (first matched) account's register"
   ,flagNone ["change"] (setboolopt "change")
     "show period balances (changes) at startup instead of historical balances"
   -- ,flagNone ["cumulative"] (setboolopt "cumulative")
@@ -50,19 +68,23 @@ uiflags = [
   -- ,flagNone ["no-elide"] (setboolopt "no-elide") "don't compress empty parent accounts on one line"
 
 --uimode :: Mode RawOpts
-uimode =  (mode "hledger-ui" (setopt "command" "ui" def)
-            "browse accounts, postings and entries in a full-window curses interface"
-            (argsFlag "[PATTERNS]") []){
-              modeGroupFlags = Group {
-                                groupUnnamed = uiflags
-                               ,groupHidden = hiddenflags
-                                 ++ [flagNone ["future"] (setboolopt "forecast") "compatibility alias, use --forecast instead"]
-                               ,groupNamed = [(generalflagsgroup1)]
-                               }
-             ,modeHelpSuffix=[
-                  -- "Reads your ~/.hledger.journal file, or another specified by $LEDGER_FILE or -f, and starts the full-window curses ui."
-                 ]
-           }
+uimode =
+  (mode "hledger-ui" (setopt "command" "ui" def)
+    "browse accounts, postings and entries in a full-window TUI"
+    (argsFlag "[--cash|--bs|--is|--all|--register=ACCT] [QUERY]") [])
+  {modeGroupFlags = Group {
+       groupUnnamed = uiflags
+      ,groupHidden = hiddenflags
+        ++
+        [flagNone ["future"] (setboolopt "forecast") "old flag, use --forecast instead"
+        ,flagNone ["menu"] (setboolopt "menu") "old flag, menu screen is now the default"
+        ]
+      ,groupNamed = mkgeneralflagsgroups1 helpflags
+      }
+  ,modeHelpSuffix=[
+    -- "Reads your ~/.hledger.journal file, or another specified by $LEDGER_FILE or -f, and starts the full-window TUI."
+  ]
+  }
 
 -- hledger-ui options, used in hledger-ui and above
 data UIOpts = UIOpts
@@ -80,27 +102,29 @@ defuiopts = UIOpts
   }
 
 -- | Process a RawOpts into a UIOpts.
--- This will return a usage error if provided an invalid theme.
+-- An invalid --theme name will raise an error.
 rawOptsToUIOpts :: RawOpts -> IO UIOpts
 rawOptsToUIOpts rawopts = do
-    cliopts <- set balanceaccum accum <$> rawOptsToCliOpts rawopts
-    return defuiopts {
-                uoWatch    = boolopt "watch" rawopts
-               ,uoTheme    = checkTheme <$> maybestringopt "theme" rawopts
-               ,uoRegister = maybestringopt "register" rawopts
-               ,uoCliOpts  = cliopts
-               }
+  cliopts <- set balanceaccum accum <$> rawOptsToCliOpts rawopts
+  return
+    defuiopts {
+       uoWatch    = boolopt "watch" rawopts
+      ,uoTheme    = checkTheme <$> maybestringopt "theme" rawopts
+      ,uoRegister = maybestringopt "register" rawopts
+      ,uoCliOpts  = cliopts
+      }
   where
     -- show historical balance by default (unlike hledger)
     accum = fromMaybe Historical $ balanceAccumulationOverride rawopts
-    checkTheme t = if t `M.member` themes then t else usageError $ "invalid theme name: " ++ t
+    checkTheme t = let t' = if t == "default" then "light" else t  -- "default" is a deprecated alias for "light"
+                   in if t' `M.member` themes then t' else usageError $ "invalid theme name: " ++ t
 
 -- XXX some refactoring seems due
 getHledgerUIOpts :: IO UIOpts
 --getHledgerUIOpts = processArgs uimode >>= return >>= rawOptsToUIOpts
 getHledgerUIOpts = do
   args <- getArgs >>= expandArgsAt
-  let args' = replaceNumericFlags args
+  let args' = ensureDebugFlagHasVal $ replaceNumericFlags args
   let cmdargopts = either usageError id $ process uimode args'
   rawOptsToUIOpts cmdargopts
 

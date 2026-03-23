@@ -27,8 +27,7 @@ import Data.List (mapAccumR, nub, partition, sortBy)
 import Data.List.Extra (nubSort)
 import Data.Maybe (catMaybes)
 import Data.Ord (Down(..), comparing)
-import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Calendar (Day)
 
 import Hledger.Data
@@ -80,10 +79,14 @@ type AccountTransactionsReportItem =
    Transaction -- the transaction, unmodified
   ,Transaction -- the transaction, as seen from the current account
   ,Bool        -- is this a split (more than one posting to other accounts) ?
-  ,Text        -- a display string describing the other account(s), if any
+  ,[AccountName] -- the other account(s), if any
   ,MixedAmount -- the amount posted to the current account(s) (or total amount posted)
   ,MixedAmount -- the register's running total or the current account(s)'s historical balance, after this transaction
   )
+
+instance HasAmounts AccountTransactionsReportItem where
+  styleAmounts styles (torig,tacct,b,c,a1,a2) =
+    (styleAmounts styles torig,styleAmounts styles tacct,b,c,styleAmounts styles a1,styleAmounts styles a2)
 
 triOrigTransaction (torig,_,_,_,_,_) = torig
 triDate (_,tacct,_,_,_,_) = tdate tacct
@@ -116,16 +119,21 @@ accountTransactionsReport rspec@ReportSpec{_rsReportOpts=ropts} j thisacctq = it
     -- Additional reportq filtering, such as date filtering, happens down in 
     -- accountTransactionsReportItem, which discards transactions with no matched postings.
     acctJournal =
-          ptraceAtWith 5 (("ts3:\n"++).pshowTransactions.jtxns)
+        -- With most calls we will not require transaction prices past this point, and can get a big
+        -- speed improvement by stripping them early. In some cases, such as in hledger-ui, we still
+        -- want to keep prices around, so we can toggle between cost and no cost quickly. We can use
+        -- the show_costs_ flag to be efficient when we can, and detailed when we have to.
+          (if show_costs_ ropts then id else journalMapPostingAmounts mixedAmountStripCosts)
+        . dbg5With (("ts3:\n"++).pshowTransactions.jtxns)
         -- maybe convert these transactions to cost or value
         . journalApplyValuationFromOpts rspec
-        . ptraceAtWith 5 (("ts2:\n"++).pshowTransactions.jtxns)
-        -- apply any cur:SYM filters in reportq
+        . dbg5With (("ts2:\n"++).pshowTransactions.jtxns)
+        -- apply any cur: or amt: filters in reportq
         . (if queryIsNull amtq then id else filterJournalAmounts amtq)
         -- only consider transactions which match thisacctq (possibly excluding postings
         -- which are not real or have the wrong status)
-        . traceAt 3 ("thisacctq: "++show thisacctq)
-        $ ptraceAtWith 5 (("ts1:\n"++).pshowTransactions.jtxns)
+        . dbg3Msg ("thisacctq: "++show thisacctq)
+        $ dbg5With (("ts1:\n"++).pshowTransactions.jtxns)
           j{jtxns = filter (matchesTransaction thisacctq . relevantPostings) $ jtxns j}
       where
         relevantPostings
@@ -142,17 +150,18 @@ accountTransactionsReport rspec@ReportSpec{_rsReportOpts=ropts} j thisacctq = it
         priorq = dbg5 "priorq" $ And [thisacctq, tostartdateq, datelessreportq]
         tostartdateq =
           case mstartdate of
-            Just _  -> Date (DateSpan Nothing mstartdate)
+            Just _  -> Date (DateSpan Nothing (Exact <$> mstartdate))
             Nothing -> None  -- no start date specified, there are no prior postings
         mstartdate = queryStartDate (date2_ ropts) reportq
         datelessreportq = filterQuery (not . queryIsDateOrDate2) reportq
 
     items =
-        accountTransactionsReportItems reportq thisacctq startbal maNegate
+        accountTransactionsReportItems reportq thisacctq startbal maNegate (journalAccountType j)
       -- sort by the transaction's register date, then index, for accurate starting balance
-      . ptraceAtWith 5 (("ts4:\n"++).pshowTransactions.map snd)
+      . dbg5With (("ts4:\n"++).pshowTransactions.map snd)
       . sortBy (comparing (Down . fst) <> comparing (Down . tindex . snd))
       . map (\t -> (transactionRegisterDate wd reportq thisacctq t, t))
+      . map (if invert_ ropts then (\t -> t{tpostings = map postingNegateMainAmount $ tpostings t}) else id)
       $ jtxns acctJournal
 
 pshowTransactions :: [Transaction] -> String
@@ -166,26 +175,34 @@ pshowTransactions = pshow . map (\t -> unwords [show $ tdate t, T.unpack $ tdesc
 -- in the report. This is not necessarily the transaction date - see
 -- transactionRegisterDate.
 accountTransactionsReportItems :: Query -> Query -> MixedAmount -> (MixedAmount -> MixedAmount)
-                               -> [(Day, Transaction)] -> [AccountTransactionsReportItem]
-accountTransactionsReportItems reportq thisacctq bal signfn =
-    catMaybes . snd . mapAccumR (accountTransactionsReportItem reportq thisacctq signfn) bal
+                               -> (AccountName -> Maybe AccountType) -> [(Day, Transaction)]
+                               -> [AccountTransactionsReportItem]
+accountTransactionsReportItems reportq thisacctq bal signfn accttypefn =
+    catMaybes . snd . mapAccumR (accountTransactionsReportItem reportq thisacctq signfn accttypefn) bal
 
-accountTransactionsReportItem :: Query -> Query -> (MixedAmount -> MixedAmount) -> MixedAmount
-                              -> (Day, Transaction) -> (MixedAmount, Maybe AccountTransactionsReportItem)
-accountTransactionsReportItem reportq thisacctq signfn bal (d, torig)
+accountTransactionsReportItem :: Query -> Query -> (MixedAmount -> MixedAmount)
+                              -> (AccountName -> Maybe AccountType) -> MixedAmount -> (Day, Transaction)
+                              -> (MixedAmount, Maybe AccountTransactionsReportItem)
+accountTransactionsReportItem reportq thisacctq signfn accttypefn bal (d, t)
     -- 201407: I've lost my grip on this, let's just hope for the best
     -- 201606: we now calculate change and balance from filtered postings, check this still works well for all callers XXX
     | null reportps = (bal, Nothing)  -- no matched postings in this transaction, skip it
-    | otherwise     = (b, Just (torig, tacct{tdate=d}, numotheraccts > 1, otheracctstr, a, b))
+    | otherwise     = (bal', Just (t, tacct{tdate=d}, numotheraccts > 1, otheraccts, amt, bal'))
     where
-      tacct@Transaction{tpostings=reportps} = filterTransactionPostings reportq torig  -- TODO needs to consider --date2, #1731
+      tacct@Transaction{tpostings=reportps} = filterTransactionPostingsExtra accttypefn reportq t  -- TODO needs to consider --date2, #1731
       (thisacctps, otheracctps) = partition (matchesPosting thisacctq) reportps
       numotheraccts = length $ nub $ map paccount otheracctps
-      otheracctstr | thisacctq == None  = summarisePostingAccounts reportps     -- no current account ? summarise all matched postings
-                   | numotheraccts == 0 = summarisePostingAccounts thisacctps   -- only postings to current account ? summarise those
-                   | otherwise          = summarisePostingAccounts otheracctps  -- summarise matched postings to other account(s)
-      a = signfn . maNegate $ sumPostings thisacctps
-      b = bal `maPlus` a
+      otheraccts | thisacctq == None  = summarisePostingAccounts reportps     -- no current account ? summarise all matched postings
+                 | numotheraccts == 0 = summarisePostingAccounts thisacctps   -- only postings to current account ? summarise those
+                 | otherwise          = summarisePostingAccounts otheracctps  -- summarise matched postings to other account(s)
+      -- 202302: Impact of t on thisacct - normally the sum of thisacctps,
+      -- but if they are null it probably means reportq is an account filter
+      -- and we should sum otheracctps instead.
+      -- This fixes hledger areg ACCT ACCT2 (#2007), hopefully it's correct in general.
+      amt
+        | null thisacctps = signfn $ sumPostings otheracctps
+        | otherwise       = signfn . maNegate $ sumPostings thisacctps
+      bal' = bal `maPlus` amt
 
 -- TODO needs checking, cf #1731
 -- | What date should be shown for a transaction in an account register report ?
@@ -218,9 +235,8 @@ transactionRegisterDate wd reportq thisacctq t
 
 -- | Generate a simplified summary of some postings' accounts.
 -- To reduce noise, if there are both real and virtual postings, show only the real ones.
-summarisePostingAccounts :: [Posting] -> Text
-summarisePostingAccounts ps =
-    T.intercalate ", " . map accountSummarisedName . nub $ map paccount displayps
+summarisePostingAccounts :: [Posting] -> [AccountName]
+summarisePostingAccounts ps = map paccount displayps
   where
     realps = filter isReal ps
     displayps | null realps = ps
@@ -238,8 +254,8 @@ accountTransactionsReportByCommodity tr =
 -- balance amount) components that don't involve the specified
 -- commodity. Other item fields such as the transaction are left unchanged.
 filterAccountTransactionsReportByCommodity :: CommoditySymbol -> AccountTransactionsReport -> AccountTransactionsReport
-filterAccountTransactionsReportByCommodity c =
-    fixTransactionsReportItemBalances . concatMap (filterTransactionsReportItemByCommodity c)
+filterAccountTransactionsReportByCommodity comm =
+    fixTransactionsReportItemBalances . concatMap (filterTransactionsReportItemByCommodity comm)
   where
     filterTransactionsReportItemByCommodity c (t,t2,s,o,a,bal)
       | c `elem` cs = [item']
@@ -254,9 +270,9 @@ filterAccountTransactionsReportByCommodity c =
     fixTransactionsReportItemBalances items = reverse $ i:(go startbal is)
       where
         i:is = reverse items
-        startbal = filterMixedAmountByCommodity c $ triBalance i
+        startbal = filterMixedAmountByCommodity comm $ triBalance i
         go _ [] = []
-        go bal ((t,t2,s,o,amt,_):is) = (t,t2,s,o,amt,bal'):go bal' is
+        go bal ((t,t2,s,o,amt,_):is') = (t,t2,s,o,amt,bal'):go bal' is'
           where bal' = bal `maPlus` amt
 
 -- tests

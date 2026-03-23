@@ -21,7 +21,7 @@ import Data.Ord (comparing)
 import Data.Time (fromGregorian)
 
 import Hledger.Data
-import Hledger.Query (Query(..))
+import Hledger.Query (Query(..), filterQuery, queryIsDepth)
 import Hledger.Reports.ReportOptions
 import Hledger.Utils
 
@@ -35,14 +35,16 @@ type EntriesReportItem = Transaction
 -- | Select transactions for an entries report.
 entriesReport :: ReportSpec -> Journal -> EntriesReport
 entriesReport rspec@ReportSpec{_rsReportOpts=ropts} =
-    sortBy (comparing $ transactionDateFn ropts) . jtxns
-    . journalApplyValuationFromOpts rspec{_rsReportOpts=ropts{show_costs_=True}}
-    . filterJournalTransactions (_rsQuery rspec)
+      sortBy (comparing $ transactionDateFn ropts)
+    . map  (if invert_ ropts then transactionNegate else id)
+    . jtxns
+    . journalApplyValuationFromOpts (setDefaultConversionOp NoConversionOp rspec)
+    . filterJournalTransactions (filterQuery (not.queryIsDepth) $ _rsQuery rspec)
 
 tests_EntriesReport = testGroup "EntriesReport" [
   testGroup "entriesReport" [
      testCase "not acct" $ (length $ entriesReport defreportspec{_rsQuery=Not . Acct $ toRegex' "bank"} samplejournal) @?= 1
-    ,testCase "date" $ (length $ entriesReport defreportspec{_rsQuery=Date $ DateSpan (Just $ fromGregorian 2008 06 01) (Just $ fromGregorian 2008 07 01)} samplejournal) @?= 3
+    ,testCase "date" $ (length $ entriesReport defreportspec{_rsQuery=Date $ DateSpan (Just $ Exact $ fromGregorian 2008 06 01) (Just $ Exact $ fromGregorian 2008 07 01)} samplejournal) @?= 3
   ]
  ]
 

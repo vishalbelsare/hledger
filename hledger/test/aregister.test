@@ -1,3 +1,5 @@
+# * aregister command
+
 <
 2021-01-01
   (b)  1
@@ -6,46 +8,45 @@
   a   1
   b  -1
 
-# 1. aregister only shows transactions matching the account query, and displays other accounts involved
+# ** 1. aregister only shows transactions matching the account query, and displays other accounts involved
 $ hledger -f- areg a
 Transactions in a and subaccounts:
 2021-01-02                      b                                1             1
 
 <
-2021-01-01
-  (a)  1
+2023-01-01
+    assets:checking   1
+    income:salary    -1
 
-2021-01-02
-  (a:aa)  10
+2023-01-02
+    assets:checking  -2
+    expenses:food     2
 
-2021-01-03
-  (a:aa:aaa)  100
-
-# 2. aregister ignores a depth limit, always showing transactions in subaccounts. #1448
-$ hledger -f- areg a depth:1
-Transactions in a and subaccounts:
-2021-01-01                      a                                1             1
-2021-01-02                      a:aa                            10            11
-2021-01-03                      a:aa:aaa                       100           111
+# ** 2. aregister ignores a depth limit, always showing transactions in subaccounts. #1448
+$ hledger -f- areg checking depth:1
+Transactions in assets:checking and subaccounts:
+2023-01-01                      in:salary                        1             1
+2023-01-02                      ex:food                         -2            -1
 
 #1634:
 
-# 3. aregister is always in historical mode, showing balance from prior transactions.
-$ hledger -f- areg a -b 2021-01-02
-Transactions in a and subaccounts:
-2021-01-02                      a:aa                            10            11
-2021-01-03                      a:aa:aaa                       100           111
+# ** 3. aregister is always in historical mode, showing balance from prior transactions.
+$ hledger -f- areg checking -b 2023-01-02
+Transactions in assets:checking and subaccounts:
+2023-01-02                      ex:food                         -2            -1
 
-# 4. Any additional arguments are a query, filtering the transactions. This may
-# cause the running balance to diverge from the real-world running balance.
-$ hledger -f- areg a aaa
-Transactions in a and subaccounts:
-2021-01-03                      a:aa:aaa                       100           100
+# ** 4. Any additional arguments are a query filtering the transactions. #2007
+# This can cause the running balance to diverge from the real-world running balance.
+# For non-date/date2/depth queries, a hint is shown in the title.
+$ hledger -f- areg checking expenses
+Transactions in assets:checking and subaccounts (matching query):
+2023-01-02                      ex:food                         -2            -2
 
-# 5. Sorts transactions first by transaction date (earliest date of the
+# ** 5. Sorts transactions first by transaction date (earliest date of the
 # matching postings) then by parse order. (#1642)
 # Also, make sure to use the posting date of matching transactions, if it
 # differs from the transaction date.
+# Also, parse order respects the order of -f options on command line (not tested here).
 <
 ~ 2021-01-03  sixth, because forecast transactions come after normal transactions
     (a)           6
@@ -91,7 +92,7 @@ Transactions in a and subaccounts:
   a    1 C
   b   -1 C
 
-# 6. aregister correctly aligns amounts when there are multiple commodities (#1656).
+# ** 6. aregister correctly aligns amounts when there are multiple commodities (#1656).
 $ hledger -f- areg a
 Transactions in a and subaccounts:
 2021-01-01                      b, c                           1 A           1 A
@@ -105,7 +106,7 @@ Transactions in a and subaccounts:
 2021-01-01=2021-02-02
   (a)   1
 
-# 7. With --date2, it should show the secondary transaction date.
+# ** 7. With --date2, it should show the secondary transaction date.
 $ hledger -f- areg a --date2
 Transactions in a and subaccounts:
 2021-02-02                      a                                1             1
@@ -121,3 +122,23 @@ Transactions in a and subaccounts:
 # # 10. should show the transaction, with the january date (?)
 # $ hledger -f- areg a date2:202102
 # 2021-01-01                      a                                1             1
+# ** 8. aregister rounds amounts to display precision (#2407)
+<
+commodity $1.00
+2025-06-12
+  (a)   $1.000
+
+$ hledger -f - areg a
+Transactions in a and subaccounts:
+2025-06-12                      a                            $1.00         $1.00
+
+# ** 9. aregister should respect the drop flag including when combining a list of accounts
+<
+2025-06-12
+  a:b   $1
+  a:c   $1
+  d
+
+$ hledger -f - areg d --drop 1
+Transactions in d and subaccounts:
+2025-06-12                      b, c                           $-2           $-2

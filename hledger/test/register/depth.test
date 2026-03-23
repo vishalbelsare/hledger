@@ -1,16 +1,15 @@
-# 1. register --depth N matches postings as usual but clips account names to N
-hledger -f - register aa --depth 1
-<<<
+# * register command depth limiting
+
+# ** 1. register --depth N matches postings as usual but clips account names to N
+<
 2010/1/1 x
   a:aa:aaa      1
   b
->>>
+$ hledger -f - register aa --depth 1
 2010-01-01 x                    a                                1             1
->>>=0
 
-# 2. separate postings remain separate
-hledger -f - register aa --depth 2
-<<<
+# ** 2. separate postings remain separate
+<
 2010/1/1 x
   a:aa      1
   b:bb:bbb
@@ -22,15 +21,13 @@ hledger -f - register aa --depth 2
 2010/1/2 z
   a:aa      1
   b:bb:bbb
->>>
+$ hledger -f - register aa --depth 2
 2010-01-01 x                    a:aa                             1             1
 2010-01-01 y                    a:aa                             1             2
 2010-01-02 z                    a:aa                             1             3
->>>=0
 
-# 3. with a reporting interval, all postings are aggregated under each (clipped) account
-hledger -f - register aa --depth 1 --daily
-<<<
+# ** 3. with a reporting interval, all postings are aggregated under each (clipped) account
+<
 2010/1/1 x
   a:aa      1
   b:bb:bbb
@@ -42,24 +39,19 @@ hledger -f - register aa --depth 1 --daily
 2010/1/2 z
   a:aa      1
   b:bb:bbb
->>>
+$ hledger -f - register aa --depth 1 --daily
 2010-01-01   a                                                   2             2
 2010-01-02   a                                                   1             3
->>>=0
 
-# 4. with --cleared
-hledger -f - register a --depth 1 --cleared
-<<<
+# ** 4. with --cleared
+<
 2012/1/1 *
   (a:aa)      1
->>>
+$ hledger -f - register a --depth 1 --cleared
 2012-01-01                      (a)                              1             1
->>>2
->>>=0
 
-# 5. depth 0 aggregates everything into a single line
-hledger -f - register --depth 0 --daily a b
-<<<
+# ** 5. depth 0 aggregates everything into a single line
+<
 2010/1/1 x
   a:aa      1
   b:bb      2
@@ -74,8 +66,26 @@ hledger -f - register --depth 0 --daily a b
   a:aa      1
   b:bb      2
   c:cc
->>>
+$ hledger -f - register --depth 0 --daily a b
 2010-01-01   ...                                                 6             6
 2010-01-02   ...                                                 3             9
->>>=0
 
+# ** 6. --drop removes leading account name segments
+<
+2010/1/1 x
+  assets:bank:checking      1
+  expenses:food:groceries  -1
+
+$ hledger -f - register --drop 1
+2010-01-01 x                    bank:checking                    1             1
+                                food:groceries                  -1             0
+
+# ** 7. --drop and --depth together: depth clips first, then drop removes leading segments
+<
+2010/1/1 x
+  assets:bank:checking:savings      1
+  expenses:food:groceries:organic  -1
+
+$ hledger -f - register --drop 1 --depth 2
+2010-01-01 x                    bank                             1             1
+                                food                            -1             0

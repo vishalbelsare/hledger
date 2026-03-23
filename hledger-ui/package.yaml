@@ -1,11 +1,19 @@
-name        : hledger-ui
-version     : 1.24
-synopsis    : Curses-style terminal interface for the hledger accounting system
-description : |
-  A simple curses-style terminal user interface for the hledger accounting system.
+name:          hledger-ui
+version: 1.52.99
+license:       GPL-3.0-or-later
+maintainer:    Simon Michael <simon@joyful.com>
+author:        Simon Michael <simon@joyful.com>
+stability:     stable
+tested-with:   ghc==9.6.7, ghc==9.8.4, ghc==9.10.2, ghc==9.12.2
+homepage:      http://hledger.org
+bug-reports:   http://bugs.hledger.org
+github:        simonmichael/hledger
+category:      Finance, Console
+synopsis:      Terminal interface for the hledger accounting system
+description: |
+  A simple terminal user interface for the hledger accounting system.
   It can be a more convenient way to browse your accounts than the CLI.
-  This package currently does not support Microsoft Windows, except in WSL.
-
+  
   hledger is a robust, cross-platform set of tools for tracking money,
   time, or any other commodity, using double-entry accounting and a
   simple, editable file format, with command-line, terminal and web
@@ -13,91 +21,94 @@ description : |
   implementations of Plain Text Accounting. Read more at:
   <https://hledger.org>
 
-category    : Finance, Console
-license     : GPL-3
-author      : Simon Michael <simon@joyful.com>
-maintainer  : Simon Michael <simon@joyful.com>
-github      : simonmichael/hledger
-homepage    : http://hledger.org
-bug-reports : http://bugs.hledger.org
-stability   : stable
-tested-with: GHC==8.6.5, GHC==8.8.4, GHC==8.10.4, GHC==9.0.1
-
 extra-source-files:
-  - CHANGES.md
-  - README.md
-  - hledger-ui.1
-  - hledger-ui.txt
-  - hledger-ui.info
-
-#data-files:
+- CHANGES.md
+- README.md
+- hledger-ui.1
+- hledger-ui.txt
+- hledger-ui.info
 
 flags:
-  threaded:
-    description: Build with support for multithreaded execution
-    manual: false
-    default: true
-
-cpp-options: -DVERSION="1.24"
+  debug:
+    description: Build with GHC 9.10+ stack traces enabled
+    default: false
+    manual:  true
+#  ghcdebug:
+#    description: Build with support for attaching a ghc-debug client
+#    default: false
+#    manual:  true
 
 dependencies:
-- hledger-lib >=1.24 && <1.25
-- hledger >=1.24 && <1.25
-- ansi-terminal >=0.9
-- async
-- base >=4.11 && <4.16
-- cmdargs >=0.8
-- containers >=0.5.9
-- data-default
-- directory
-- doclayout >=0.3 && <0.4
-- extra >=1.6.3
-- filepath
-- fsnotify >=0.2.1.2 && <0.4
-- microlens >=0.4
-- microlens-platform >=0.2.3.1
-- megaparsec >=7.0.0 && <9.3
-- process >=1.2
-- safe >=0.2
-- split >=0.1
-- text >=1.2
-- text-zipper >=0.4
-- time >=1.5
-- transformers
-- vector
-# not installable on windows, cf buildable flag below
-- brick >=0.23
-- vty >=5.15
-- unix
+- base >=4.18 && <4.23
+
+cpp-options: -DVERSION="1.52.99"
+
+language: GHC2021
+
+ghc-options:
+- -Wall
+- -Wno-incomplete-uni-patterns
+- -Wno-missing-signatures
+- -Wno-orphans
+- -Wno-type-defaults
+- -Wno-unused-do-bind
 
 when:
- # curses is required to build terminfo for vty for hledger-ui.
- # On POSIX systems it might be not present.
- # On windows it's very likely not present, but possibly it could be.
- # Ideally we'd like to
- # on POSIX: give a clear error ("install your system libcurses-dev package") if not present
- # on windows: quietly skip building if not present, build if it is present
- #  curses
- #    default: True
- #    description:
- # For now, just don't build hledger-ui on windows
- - condition: os(windows)
-   then:
-     buildable: false
-   else:
-     buildable: true
+
+- condition: (flag(debug))
+  cpp-options: -DDEBUG
+
+# - condition: (flag(ghcdebug))
+#   cpp-options: -DGHCDEBUG
+#   dependencies:
+#   - ghc-debug-stub >=0.6.0.0 && <0.7
+
+library:
+  source-dirs: .
+  # default: All modules in source-dirs less other-modules less modules mentioned in when
+  # exposed-modules:
+  dependencies:
+  - hledger-lib >=1.52.99 && <1.53
+  - hledger >=1.52.99 && <1.53
+  - ansi-terminal >=0.9
+  - async
+  - cmdargs >=0.8
+  - containers >=0.5.9
+  - data-default
+  - directory
+  - doclayout >=0.3 && <0.6
+  - extra >=1.7.11
+  - filepath
+  - fsnotify >=0.4.2.0 && <0.5
+  - githash >=0.1.6.2
+  - microlens >=0.4
+  - microlens-platform >=0.2.3.1
+  - megaparsec >=7.0.0 && <9.8
+  - mtl >=2.2.1
+  - process >=1.2
+  - safe >=0.3.20
+  - split >=0.1
+  - stm
+  - text >=1.2.4.1
+  - text-zipper >=0.4
+  - time >=1.5
+  - transformers
+  - vector
+  - brick >=2.1.1 && <2.3.2 || >2.3.2 && < 2.11
+  - vty >=6.1 && <6.6
+  - vty-crossplatform >= 0.4.0.0 && < 0.5.0.0
+  when:
+    - condition: os(windows)
+      then:
+        dependencies: vty-windows >= 0.2.0.1 && < 0.3.0.0
+      else:
+        dependencies: unix
 
 executables:
   hledger-ui:
-    source-dirs: .
+    source-dirs: app
     main: hledger-ui.hs
-    ghc-options:
-      -Wall
-      -fno-warn-unused-do-bind
-      -fno-warn-name-shadowing
-      -fno-warn-missing-signatures
-      -fno-warn-type-defaults
-      -fno-warn-orphans
-    when:
-    - condition: flag(threaded)
-      ghc-options: -threaded
+    # -threaded is needed for runPager, at least
+    ghc-options: -threaded
+    dependencies:
+    - hledger-ui

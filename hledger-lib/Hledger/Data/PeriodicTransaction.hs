@@ -11,16 +11,18 @@ module Hledger.Data.PeriodicTransaction (
 )
 where
 
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import Data.Function ((&))
+import Data.Maybe (isNothing)
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
 import Text.Printf
 
 import Hledger.Data.Types
 import Hledger.Data.Dates
+import Hledger.Data.DayPartition
 import Hledger.Data.Amount
-import Hledger.Data.Posting (post, commentAddTagNextLine)
+import Hledger.Data.Posting (post, generatedTransactionTagName)
 import Hledger.Data.Transaction
-import Hledger.Utils
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -33,34 +35,30 @@ _ptgen str = do
   let
     t = T.pack str
     (i,s) = parsePeriodExpr' nulldate t
-  case checkPeriodicTransactionStartDate i s t of
-    Just e  -> error' e  -- PARTIAL:
-    Nothing ->
-      mapM_ (T.putStr . showTransaction) $
-        runPeriodicTransaction
-          nullperiodictransaction{ ptperiodexpr=t , ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1] }
-          nulldatespan
+  mapM_ (T.putStr . showTransaction) $
+    runPeriodicTransaction True
+      nullperiodictransaction{ ptperiodexpr=t , ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1] }
+      nulldatespan
 
-_ptgenspan str span = do
+_ptgenspan str spn = do
   let
     t = T.pack str
     (i,s) = parsePeriodExpr' nulldate t
-  case checkPeriodicTransactionStartDate i s t of
-    Just e  -> error' e  -- PARTIAL:
-    Nothing ->
-      mapM_ (T.putStr . showTransaction) $
-        runPeriodicTransaction
-          nullperiodictransaction{ ptperiodexpr=t , ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1] }
-          span
+  mapM_ (T.putStr . showTransaction) $
+    runPeriodicTransaction True
+      nullperiodictransaction{ ptperiodexpr=t , ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1] }
+      spn
 
 --deriving instance Show PeriodicTransaction
 -- for better pretty-printing:
 instance Show PeriodicTransaction where
   show PeriodicTransaction{..} =
-    printf "PeriodicTransactionPP {%s, %s, %s, %s, %s, %s, %s, %s, %s}"
+    printf "PeriodicTransactionPP {%s, %s, %s, %s, %s, %s, %s, %s, %s, %s}"
+      -- Warning, be careful to keep these synced ^ v
       ("ptperiodexpr=" ++ show ptperiodexpr)
       ("ptinterval=" ++ show ptinterval)
       ("ptspan=" ++ show (show ptspan))
+      ("ptsourcepos=" ++ show ptsourcepos)
       ("ptstatus=" ++ show (show ptstatus))
       ("ptcode=" ++ show ptcode)
       ("ptdescription=" ++ show ptdescription)
@@ -73,7 +71,9 @@ instance Show PeriodicTransaction where
 
 --nullperiodictransaction is defined in Types.hs
 
--- | Generate transactions from 'PeriodicTransaction' within a 'DateSpan'
+-- | Generate transactions from 'PeriodicTransaction' within a 'DateSpan'.
+-- This should be a closed span with both start and end dates specified;
+-- an open ended span will generate no transactions.
 --
 -- Note that new transactions require 'txnTieKnot' post-processing.
 -- The new transactions will have three tags added: 
@@ -115,10 +115,6 @@ instance Show PeriodicTransaction where
 -- <BLANKLINE>
 --
 -- >>> _ptgen "every 2nd day of month from 2017/02 to 2017/04"
--- 2017-01-02
---     ; generated-transaction: ~ every 2nd day of month from 2017/02 to 2017/04
---     a           $1.00
--- <BLANKLINE>
 -- 2017-02-02
 --     ; generated-transaction: ~ every 2nd day of month from 2017/02 to 2017/04
 --     a           $1.00
@@ -129,10 +125,6 @@ instance Show PeriodicTransaction where
 -- <BLANKLINE>
 --
 -- >>> _ptgen "every 30th day of month from 2017/1 to 2017/5"
--- 2016-12-30
---     ; generated-transaction: ~ every 30th day of month from 2017/1 to 2017/5
---     a           $1.00
--- <BLANKLINE>
 -- 2017-01-30
 --     ; generated-transaction: ~ every 30th day of month from 2017/1 to 2017/5
 --     a           $1.00
@@ -151,10 +143,6 @@ instance Show PeriodicTransaction where
 -- <BLANKLINE>
 --
 -- >>> _ptgen "every 2nd Thursday of month from 2017/1 to 2017/4"
--- 2016-12-08
---     ; generated-transaction: ~ every 2nd Thursday of month from 2017/1 to 2017/4
---     a           $1.00
--- <BLANKLINE>
 -- 2017-01-12
 --     ; generated-transaction: ~ every 2nd Thursday of month from 2017/1 to 2017/4
 --     a           $1.00
@@ -169,10 +157,6 @@ instance Show PeriodicTransaction where
 -- <BLANKLINE>
 --
 -- >>> _ptgen "every nov 29th from 2017 to 2019"
--- 2016-11-29
---     ; generated-transaction: ~ every nov 29th from 2017 to 2019
---     a           $1.00
--- <BLANKLINE>
 -- 2017-11-29
 --     ; generated-transaction: ~ every nov 29th from 2017 to 2019
 --     a           $1.00
@@ -188,33 +172,17 @@ instance Show PeriodicTransaction where
 --     a           $1.00
 -- <BLANKLINE>
 --
--- >>> _ptgen ""
--- *** Exception: failed to parse...
--- ...
---
--- >>> _ptgen "weekly from 2017"
--- *** Exception: Unable to generate transactions according to "weekly from 2017" because 2017-01-01 is not a first day of the Week
---
--- >>> _ptgen "monthly from 2017/5/4"
--- *** Exception: Unable to generate transactions according to "monthly from 2017/5/4" because 2017-05-04 is not a first day of the Month
---
--- >>> _ptgen "every quarter from 2017/1/2"
--- *** Exception: Unable to generate transactions according to "every quarter from 2017/1/2" because 2017-01-02 is not a first day of the Quarter
---
--- >>> _ptgen "yearly from 2017/1/14"
--- *** Exception: Unable to generate transactions according to "yearly from 2017/1/14" because 2017-01-14 is not a first day of the Year
---
--- >>> let reportperiod="daily from 2018/01/03" in let (i,s) = parsePeriodExpr' nulldate reportperiod in runPeriodicTransaction (nullperiodictransaction{ptperiodexpr=reportperiod, ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1]}) (DateSpan (Just $ fromGregorian 2018 01 01) (Just $ fromGregorian 2018 01 03))
+-- >>> let reportperiod="daily from 2018/01/03" in let (i,s) = parsePeriodExpr' nulldate reportperiod in runPeriodicTransaction True (nullperiodictransaction{ptperiodexpr=reportperiod, ptspan=s, ptinterval=i, ptpostings=["a" `post` usd 1]}) (DateSpan (Just $ Flex $ fromGregorian 2018 01 01) (Just $ Flex $ fromGregorian 2018 01 03))
 -- []
 --
--- >>> _ptgenspan "every 3 months from 2019-05" (DateSpan (Just $ fromGregorian 2020 01 01) (Just $ fromGregorian 2020 02 01))
+-- >>> _ptgenspan "every 3 months from 2019-05" (DateSpan (Just $ Flex $ fromGregorian 2020 01 01) (Just $ Flex $ fromGregorian 2020 02 01))
 --
--- >>> _ptgenspan "every 3 months from 2019-05" (DateSpan (Just $ fromGregorian 2020 02 01) (Just $ fromGregorian 2020 03 01))
+-- >>> _ptgenspan "every 3 months from 2019-05" (DateSpan (Just $ Flex $ fromGregorian 2020 02 01) (Just $ Flex $ fromGregorian 2020 03 01))
 -- 2020-02-01
 --     ; generated-transaction: ~ every 3 months from 2019-05
 --     a           $1.00
 -- <BLANKLINE>
--- >>> _ptgenspan "every 3 days from 2018" (DateSpan (Just $ fromGregorian 2018 01 01) (Just $ fromGregorian 2018 01 05))
+-- >>> _ptgenspan "every 3 days from 2018" (DateSpan (Just $ Flex $ fromGregorian 2018 01 01) (Just $ Flex $ fromGregorian 2018 01 05))
 -- 2018-01-01
 --     ; generated-transaction: ~ every 3 days from 2018
 --     a           $1.00
@@ -223,32 +191,34 @@ instance Show PeriodicTransaction where
 --     ; generated-transaction: ~ every 3 days from 2018
 --     a           $1.00
 -- <BLANKLINE>
--- >>> _ptgenspan "every 3 days from 2018" (DateSpan (Just $ fromGregorian 2018 01 02) (Just $ fromGregorian 2018 01 05))
+-- >>> _ptgenspan "every 3 days from 2018" (DateSpan (Just $ Flex $ fromGregorian 2018 01 02) (Just $ Flex $ fromGregorian 2018 01 05))
 -- 2018-01-04
 --     ; generated-transaction: ~ every 3 days from 2018
 --     a           $1.00
 -- <BLANKLINE>
 
-runPeriodicTransaction :: PeriodicTransaction -> DateSpan -> [Transaction]
-runPeriodicTransaction PeriodicTransaction{..} requestedspan =
-    [ t{tdate=d} | (DateSpan (Just d) _) <- alltxnspans, spanContainsDate requestedspan d ]
+runPeriodicTransaction :: Bool -> PeriodicTransaction -> DateSpan -> [Transaction]
+runPeriodicTransaction verbosetags PeriodicTransaction{..} requestedspan =
+    [ t{tdate=d} | (d, _) <- maybe [] dayPartitionToList alltxnspans, spanContainsDate requestedspan d ]
   where
     t = nulltransaction{
-           tstatus      = ptstatus
+           tsourcepos   = ptsourcepos
+          ,tstatus      = ptstatus
           ,tcode        = ptcode
           ,tdescription = ptdescription
           ,tcomment     = ptcomment
-                          `commentAddTagNextLine` ("generated-transaction",period)
-          ,ttags        = ("_generated-transaction",period) :
-                          ("generated-transaction" ,period) :
-                          pttags
+          ,ttags        = pttags
           ,tpostings    = ptpostings
           }
+        & transactionAddHiddenAndMaybeVisibleTag verbosetags (generatedTransactionTagName, period)
     period = "~ " <> ptperiodexpr
-    -- All spans described by this periodic transaction, where spanStart is event date.
-    -- If transaction does not have start/end date, we set them to start/end of requested span,
-    -- to avoid generating (infinitely) many events. 
-    alltxnspans = dbg3 "alltxnspans" $ ptinterval `splitSpan` (spanDefaultsFrom ptspan requestedspan)
+    -- All the date spans described by this periodic transaction rule.
+    alltxnspans = splitSpan adjust ptinterval span'
+      where
+        -- If the PT does not specify  start or end dates, we take them from the requestedspan.
+        span' = ptspan `spanValidDefaultsFrom` requestedspan
+        -- Unless the PT specified a start date explicitly, we will adjust the start date to the previous interval boundary.
+        adjust = isNothing $ spanStart span'
 
 -- | Check that this date span begins at a boundary of this interval,
 -- or return an explanatory error message including the provided period expression
@@ -263,7 +233,7 @@ checkPeriodicTransactionStartDate i s periodexpr =
     _                    -> Nothing
     where
       checkStart d x =
-        let firstDate = fixSmartDate d $ SmartRelative This x
+        let firstDate = fromEFDay $ fixSmartDate d $ SmartRelative 0 x
         in
          if d == firstDate
          then Nothing

@@ -4,7 +4,7 @@
 {-|
 
 A reader for hledger's journal file format
-(<http://hledger.org/MANUAL.html#the-journal-file>).  hledger's journal
+(<http://hledger.org/hledger.html#the-journal-file>).  hledger's journal
 format is a compatible subset of c++ ledger's
 (<http://ledger-cli.org/3.0/doc/ledger3.html#Journal-Format>), so this
 reader should handle many ledger files as well. Example:
@@ -32,6 +32,7 @@ Hledger.Read.Common, to avoid import cycles.
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE PackageImports      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiWayIf #-}
 
 --- ** exports
 module Hledger.Read.JournalReader (
@@ -71,38 +72,41 @@ module Hledger.Read.JournalReader (
 where
 
 --- ** imports
-import qualified Control.Monad.Fail as Fail (fail)
-import qualified Control.Exception as C
-import Control.Monad (forM_, when, void)
+import Control.Exception qualified as C
+import Control.Monad (forM_, when, void, unless, filterM, forM)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Except (ExceptT(..), runExceptT)
 import Control.Monad.State.Strict (evalStateT,get,modify',put)
 import Control.Monad.Trans.Class (lift)
 import Data.Char (toLower)
-import Data.Either (isRight)
-import qualified Data.Map.Strict as M
+import Data.Either (isRight, lefts)
+import Data.Functor ((<&>))
+import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.String
 import Data.List
 import Data.Maybe
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Calendar
 import Data.Time.LocalTime
 import Safe
 import Text.Megaparsec hiding (parse)
 import Text.Megaparsec.Char
-import Text.Megaparsec.Custom
 import Text.Printf
+import System.Directory (canonicalizePath, doesFileExist, makeAbsolute)
 import System.FilePath
 import "Glob" System.FilePath.Glob hiding (match)
+-- import "filepattern" System.FilePattern.Directory
 
 import Hledger.Data
 import Hledger.Read.Common
 import Hledger.Utils
 
-import qualified Hledger.Read.TimedotReader as TimedotReader (reader)
-import qualified Hledger.Read.TimeclockReader as TimeclockReader (reader)
-import qualified Hledger.Read.CsvReader as CsvReader (reader)
+import Hledger.Read.CsvReader qualified as CsvReader (reader)
+import Hledger.Read.RulesReader qualified as RulesReader (reader)
+import Hledger.Read.TimeclockReader qualified as TimeclockReader (reader)
+import Hledger.Read.TimedotReader qualified as TimedotReader (reader)
+import Data.Function ((&))
 
 --- ** doctest setup
 -- $setup
@@ -113,7 +117,7 @@ import qualified Hledger.Read.CsvReader as CsvReader (reader)
 -- | Run a journal parser in some monad. See also: parseWithState.
 runJournalParser, rjp
   :: Monad m
-  => JournalParser m a -> Text -> m (Either (ParseErrorBundle Text CustomErr) a)
+  => JournalParser m a -> Text -> m (Either HledgerParseErrors a)
 runJournalParser p = runParserT (evalStateT p nulljournal) ""
 rjp = runJournalParser
 
@@ -122,7 +126,7 @@ runErroringJournalParser, rejp
   :: Monad m
   => ErroringJournalParser m a
   -> Text
-  -> m (Either FinalParseError (Either (ParseErrorBundle Text CustomErr) a))
+  -> m (Either FinalParseError (Either HledgerParseErrors a))
 runErroringJournalParser p t =
   runExceptT $ runParserT (evalStateT p nulljournal) "" t
 rejp = runErroringJournalParser
@@ -137,21 +141,26 @@ readers' = [
   reader
  ,TimeclockReader.reader
  ,TimedotReader.reader
- ,CsvReader.reader
+ ,RulesReader.reader
+ ,CsvReader.reader Csv
+ ,CsvReader.reader Tsv
+ ,CsvReader.reader Ssv
 --  ,LedgerReader.reader
  ]
 
 readerNames :: [String]
-readerNames = map rFormat (readers'::[Reader IO])
+readerNames = map (show . rFormat) (readers'::[Reader IO])
 
 -- | @findReader mformat mpath@
 --
 -- Find the reader named by @mformat@, if provided.
+-- ("ssv" and "tsv" are recognised as alternate names for the csv reader,
+-- which also handles those formats.)
 -- Or, if a file path is provided, find the first reader that handles
 -- its file extension, if any.
 findReader :: MonadIO m => Maybe StorageFormat -> Maybe FilePath -> Maybe (Reader m)
 findReader Nothing Nothing     = Nothing
-findReader (Just fmt) _        = headMay [r | r <- readers', rFormat r == fmt]
+findReader (Just fmt) _        = headMay [r | r <- readers', let rname = rFormat r, rname == fmt]
 findReader Nothing (Just path) =
   case prefix of
     Just fmt -> headMay [r | r <- readers', rFormat r == fmt]
@@ -160,24 +169,47 @@ findReader Nothing (Just path) =
     (prefix,path') = splitReaderPrefix path
     ext            = map toLower $ drop 1 $ takeExtension path'
 
--- | A file path optionally prefixed by a reader name and colon
--- (journal:, csv:, timedot:, etc.).
-type PrefixedFilePath = FilePath
-
--- | If a filepath is prefixed by one of the reader names and a colon,
--- split that off. Eg "csv:-" -> (Just "csv", "-").
-splitReaderPrefix :: PrefixedFilePath -> (Maybe String, FilePath)
+-- | Separate a file path and its reader prefix, if any.
+--
+-- >>> splitReaderPrefix "csv:-"
+-- (Just csv,"-")
+splitReaderPrefix :: PrefixedFilePath -> (Maybe StorageFormat, FilePath)
 splitReaderPrefix f =
-  headDef (Nothing, f)
-  [(Just r, drop (length r + 1) f) | r <- readerNames, (r++":") `isPrefixOf` f]
+  let 
+    candidates = [(Just r, drop (length r + 1) f) | r <- readerNames ++ ["ssv","tsv"], (r++":") `isPrefixOf` f]
+    (strPrefix, newF) = headDef (Nothing, f) candidates
+  in case strPrefix of
+    Just "csv" -> (Just (Sep Csv), newF)
+    Just "tsv" -> (Just (Sep Tsv), newF)
+    Just "ssv" -> (Just (Sep Ssv), newF)
+    Just "journal" -> (Just Journal', newF)
+    Just "timeclock" -> (Just Timeclock, newF)
+    Just "timedot" -> (Just Timedot, newF)
+    _ -> (Nothing, f)
+
+-- -- | Does this file path have a reader prefix ?
+-- hasReaderPrefix :: PrefixedFilePath -> Bool
+-- hasReaderPrefix = isJust . fst. splitReaderPrefix
+
+-- -- | Add a reader prefix to a file path, unless it already has one.
+-- -- The argument should be a valid reader name.
+-- --
+-- -- >>> addReaderPrefix "csv" "a.txt"
+-- -- >>> "csv:a.txt"
+-- -- >>> addReaderPrefix "csv" "timedot:a.txt"
+-- -- >>> "timedot:a.txt"
+-- addReaderPrefix :: ReaderPrefix -> FilePath -> PrefixedFilePath
+-- addReaderPrefix readername f
+--   | hasReaderPrefix f = f
+--   | otherwise = readername <> ":" <> f
 
 --- ** reader
 
 reader :: MonadIO m => Reader m
 reader = Reader
-  {rFormat     = "journal"
+  {rFormat     = Journal'
   ,rExtensions = ["journal", "j", "hledger", "ledger"]
-  ,rReadFn     = parse
+  ,rReadFn     = handleReadFnToTextReadFn parse
   ,rParser    = journalp  -- no need to add command line aliases like journalp'
                            -- when called as a subparser I think
   }
@@ -185,12 +217,12 @@ reader = Reader
 -- | Parse and post-process a "Journal" from hledger's journal file
 -- format, or give an error.
 parse :: InputOpts -> FilePath -> Text -> ExceptT String IO Journal
-parse iopts = parseAndFinaliseJournal journalp' iopts
+parse iopts f = parseAndFinaliseJournal journalp' iopts f
   where
     journalp' = do
       -- reverse parsed aliases to ensure that they are applied in order given on commandline
       mapM_ addAccountAlias (reverse $ aliasesFromOpts iopts)
-      journalp
+      journalp iopts
 
 --- ** parsers
 --- *** journal
@@ -198,23 +230,23 @@ parse iopts = parseAndFinaliseJournal journalp' iopts
 -- | A journal parser. Accumulates and returns a "ParsedJournal",
 -- which should be finalised/validated before use.
 --
--- >>> rejp (journalp <* eof) "2015/1/1\n a  0\n"
--- Right (Right Journal  with 1 transactions, 1 accounts)
+-- >>> rejp (journalp definputopts <* eof) "2015/1/1\n a  0\n"
+-- Right (Right Journal (unknown) with 1 transactions, 1 accounts)
 --
-journalp :: MonadIO m => ErroringJournalParser m ParsedJournal
-journalp = do
-  many addJournalItemP
+journalp :: MonadIO m => InputOpts -> ErroringJournalParser m ParsedJournal
+journalp iopts = do
+  many $ addJournalItemP iopts
   eof
   get
 
 -- | A side-effecting parser; parses any kind of journal item
 -- and updates the parse state accordingly.
-addJournalItemP :: MonadIO m => ErroringJournalParser m ()
-addJournalItemP =
+addJournalItemP :: MonadIO m => InputOpts -> ErroringJournalParser m ()
+addJournalItemP iopts =
   -- all journal line types can be distinguished by the first
   -- character, can use choice without backtracking
   choice [
-      directivep
+      directivep iopts
     , transactionp          >>= modify' . addTransaction
     , transactionmodifierp  >>= modify' . addTransactionModifier
     , periodictransactionp  >>= modify' . addPeriodicTransaction
@@ -226,132 +258,271 @@ addJournalItemP =
 --- *** directives
 
 -- | Parse any journal directive and update the parse state accordingly.
--- Cf http://hledger.org/manual.html#directives,
+-- Cf http://hledger.org/hledger.html#directives,
 -- http://ledger-cli.org/3.0/doc/ledger3.html#Command-Directives
-directivep :: MonadIO m => ErroringJournalParser m ()
-directivep = (do
-  optional $ char '!'
+directivep :: MonadIO m => InputOpts -> ErroringJournalParser m ()
+directivep iopts = (do
+  optional $ oneOf ['!','@']
   choice [
-    includedirectivep
+    includedirectivep iopts
    ,aliasdirectivep
    ,endaliasesdirectivep
    ,accountdirectivep
    ,applyaccountdirectivep
+   ,applyfixeddirectivep
+   ,applytagdirectivep
+   ,assertdirectivep
+   ,bucketdirectivep
+   ,capturedirectivep
+   ,checkdirectivep
+   ,commandlineflagdirectivep
    ,commoditydirectivep
-   ,endapplyaccountdirectivep
-   ,payeedirectivep
-   ,tagdirectivep
-   ,endtagdirectivep
+   ,commodityconversiondirectivep
+   ,decimalmarkdirectivep
    ,defaultyeardirectivep
    ,defaultcommoditydirectivep
-   ,commodityconversiondirectivep
+   ,definedirectivep
+   ,endapplyaccountdirectivep
+   ,endapplyfixeddirectivep
+   ,endapplytagdirectivep
+   ,endapplyyeardirectivep
+   ,endtagdirectivep
+   ,evaldirectivep
+   ,exprdirectivep
    ,ignoredpricecommoditydirectivep
-   ,decimalmarkdirectivep
+   ,payeedirectivep
+   ,pythondirectivep
+   ,tagdirectivep
+   ,valuedirectivep
    ]
   ) <?> "directive"
 
--- | Parse an include directive. include's argument is an optionally
--- file-format-prefixed file path or glob pattern. In the latter case,
--- the prefix is applied to each matched path. Examples:
--- foo.j, foo/bar.j, timedot:foo/2020*.md
-includedirectivep :: MonadIO m => ErroringJournalParser m ()
-includedirectivep = do
+-- | Parse an include directive, and the file(s) it refers to, possibly recursively.
+-- Input options are required since they may affect parsing (of timeclock files, specifically).
+-- include's argument is a file path or glob pattern (see findMatchedFiles for details),
+-- optionally with a file type prefix. Relative paths are relative to the current file.
+includedirectivep :: MonadIO m => InputOpts -> ErroringJournalParser m ()
+includedirectivep iopts = do
+  -- save the position at start of include directive, for error messages
+  eoff <- getOffset
+  pos <- getSourcePos
+  let errorNoArg = customFailure $ parseErrorAt eoff "include needs a file path or glob pattern argument"
+
+  -- parse the directive
   string "include"
-  lift skipNonNewlineSpaces1
-  prefixedglob <- T.unpack <$> takeWhileP Nothing (/= '\n') -- don't consume newline yet
-  parentoff <- getOffset
-  parentpos <- getSourcePos
-  let (mprefix,glob) = splitReaderPrefix prefixedglob
-  paths <- getFilePaths parentoff parentpos glob
+  -- notFollowedBy newline <?> "a file path or glob pattern argument"
+  prefixedglob <- (do
+    lift skipNonNewlineSpaces1
+    prefixedglob <- rstrip . T.unpack <$> takeWhileP Nothing (`notElem` [';','\n'])
+    lift followingcommentp
+    return prefixedglob
+    ) <|> errorNoArg
+
+  let (mprefix,path) = splitReaderPrefix prefixedglob
+  parentf <- sourcePosFilePath pos
+  when (null $ dbg6 (parentf <> " include: path ") path) errorNoArg
+
+  -- Find the file or glob-matched files (just the ones from this include directive), with some IO error checking.
+  paths <- findMatchedFiles eoff parentf path
+  -- Also report whether a glob pattern was used, and not just a literal file path.
+  -- (paths, isglob) <- findMatchedFiles off pos glb
+
+  -- XXX worth the trouble ? no
+  -- Comprehensively exclude files already processed. Some complexities here:
+  -- If this include directive uses a glob pattern, remove duplicates. 
+  -- Ie if this glob pattern matches any files we have already processed (or the current file),
+  -- due to multiple includes in sequence or in a cycle, exclude those files so they're not processed again.
+  -- If this include directive uses a literal file path, don't remove duplicates.
+  -- Multiple includes in sequence will cause the included file to be processed multiple times.
+  -- Multiple includes forming a cycle will be detected and reported as an error in parseIncludedFile.
+  -- let paths' = if isglob then filter (...) paths else paths
+
+  -- if there was a reader prefix, apply it to all the file paths
   let prefixedpaths = case mprefix of
         Nothing  -> paths
-        Just fmt -> map ((fmt++":")++) paths
-  forM_ prefixedpaths $ parseChild parentpos
-  void newline
+        Just fmt -> map ((show fmt++":")++) paths
+
+  -- Parse each one, as if inlined here.
+  forM_ prefixedpaths $ parseIncludedFile iopts eoff
 
   where
-    getFilePaths
-      :: MonadIO m => Int -> SourcePos -> FilePath -> JournalParser m [FilePath]
-    getFilePaths parseroff parserpos filename = do
-        let curdir = takeDirectory (sourceName parserpos)
-        filename' <- lift $ expandHomePath filename
-                         `orRethrowIOError` (show parserpos ++ " locating " ++ filename)
-        -- Compiling filename as a glob pattern works even if it is a literal
-        fileglob <- case tryCompileWith compDefault{errorRecovery=False} filename' of
-            Right x -> pure x
-            Left e -> customFailure $
-                        parseErrorAt parseroff $ "Invalid glob pattern: " ++ e
-        -- Get all matching files in the current working directory, sorting in
-        -- lexicographic order to simulate the output of 'ls'.
-        filepaths <- liftIO $ sort <$> globDir1 fileglob curdir
-        if (not . null) filepaths
-            then pure filepaths
-            else customFailure $ parseErrorAt parseroff $
-                   "No existing files match pattern: " ++ filename
 
-    parseChild :: MonadIO m => SourcePos -> PrefixedFilePath -> ErroringJournalParser m ()
-    parseChild parentpos prefixedpath = do
+    -- | Find the files matched by a literal path or a glob pattern.
+    -- Examples: foo.j, ../foo/bar.j, timedot:/foo/2020*, *.journal, **.journal.
+    --
+    -- Uses the current parse context for detecting the current directory and for error messages.
+    -- Expands a leading tilde to the user's home directory.
+    -- Converts ** without a slash to **/*, like zsh's GLOB_STAR_SHORT, so ** also matches file name parts.
+    -- Checks if any matched paths are directories and excludes those.
+    -- Converts all matched paths to their canonical form.
+    -- Note * and ** mostly won't implicitly match dot files or dot directories,
+    -- but ** will implicitly search non-top-level dot directories (see #2498, Glob#49).
+
+    findMatchedFiles :: (MonadIO m) => Int -> FilePath -> FilePath -> JournalParser m [FilePath]
+    findMatchedFiles off parentf path = do
+
+      -- Some notes about the Glob library that we use (related: https://github.com/Deewiant/glob/issues/49):
+      -- It does not expand tilde.
+      -- It does not canonicalise paths.
+      -- The results are not in any particular order.
+      -- The results can include directories.
+      -- DIRPAT/ is equivalent to DIRPAT, except results will end with // (double slash).
+      -- A . or .. path component can match the current or parent directories (including them in the results).
+      -- * matches zero or more characters in a file or directory name.
+      -- * at the start of a file name ignores dot-named files and directories, by default.
+      -- ** (or zero or more consecutive *'s) not followed by slash is equivalent to *.
+      -- A **/ component matches any number of directory parts.
+      -- A **/ does not implicitly search top-level dot directories or implicitly match do files,
+      -- but it does search non-top-level dot directories. Eg ** will find the c file in a/.b/c.
+      -- It tends to get attributes of all files in a directory.
+
+      -- expand a tilde at the start of the glob pattern, or throw an error
+      expandedpath <- lift $ expandHomePath path & handleIOError off "failed to expand ~"
+
+      -- get the directory of the including file
+      -- need to canonicalise a symlink parentf so takeDirectory works correctly [#2503]
+      cwd <- fmap takeDirectory <$> liftIO $ canonicalizePath parentf
+
+      -- Don't allow 3 or more stars.
+      when ("***" `isInfixOf` expandedpath) $
+        customFailure $ parseErrorAt off $ "Invalid glob pattern: too many stars, use * or **"
+
+      -- Make ** also match file name parts like zsh's GLOB_STAR_SHORT.
+      let
+        finalpath =
+          -- ** without a slash is equivalent to **/*
+          case regexReplace (toRegex' $ T.pack "\\*\\*([^/\\])") "**/*\\1" expandedpath of
+            Right s -> s
+            Left  _ -> expandedpath   -- ignore any error, there should be none
+
+      -- Compile as a Pattern. Can throw an error.
+      pat <- case tryCompileWith compDefault{errorRecovery=False} finalpath of
+        Left e  -> customFailure $ parseErrorAt off $ "Invalid glob pattern: " ++ e
+        Right x -> pure x
+
+      -- Find all paths matched by the glob pattern.
+      -- If it is a literal (non-glob) path, don't use the Glob lib, because it gets attributes
+      -- of all files in the directory, which confuses build systems like tup.
+      paths <-
+        if isLiteral pat
+        then return $ if isAbsolute finalpath then [finalpath] else [cwd </> finalpath]
+        else liftIO $ globDir1 pat cwd
+
+      -- Exclude any directories or symlinks to directories, and canonicalise, and sort.
+      files <- liftIO $
+        filterM doesFileExist paths
+        >>= mapM makeAbsolute
+        <&> sort
+
+      -- Throw an error if one of these files is among the grandparent files, forming a cycle.
+      -- Though, ignore the immediate parent file for convenience. XXX inconsistent - should it ignore all cyclic includes ?
+      -- Use canonical paths for cycle detection, show nominal absolute paths in error messages.
+      parentj <- get
+      let parentfiles = jincludefilestack parentj
+          cparentfiles = map snd parentfiles
+          cparentf = take 1 cparentfiles
+      files2 <- forM files $ \f -> do
+        cf <- liftIO $ canonicalizePath f
+        if
+          | [cf] == cparentf -> return cf  -- current file - return canonicalised, will be excluded later
+          | cf `elem` drop 1 cparentfiles -> customFailure $ parseErrorAt off $ "This included file forms a cycle: " ++ f
+          | otherwise -> return f
+
+      -- Throw an error if no files were matched.
+      when (null files2) $ customFailure $ parseErrorAt off $ "No files were matched by: " ++ path
+
+      -- If the current file got included, ignore it (last, to avoid triggering the error above).
+      let
+        files3 =
+          dbg6 (parentf <> " include: matched files (excluding current file)") $
+          filter (not.(`elem` cparentf)) files2
+
+      return files3
+
+    -- Parse the given included file (and any deeper includes, recursively) as if it was inlined in the current (parent) file.
+    -- The offset of the start of the include directive in the parent file is provided for error messages.
+    parseIncludedFile :: MonadIO m => InputOpts -> Int -> PrefixedFilePath -> ErroringJournalParser m ()
+    parseIncludedFile iopts1 off prefixedpath = do
       let (_mprefix,filepath) = splitReaderPrefix prefixedpath
 
+      -- Read the file's content, or throw an error
+      childInput <- lift $ readFilePortably filepath & handleIOError off "failed to read a file"
+      cfilepath <- liftIO $ canonicalizePath filepath
       parentj <- get
-      let parentfilestack = jincludefilestack parentj
-      when (filepath `elem` parentfilestack) $
-        Fail.fail ("Cyclic include: " ++ filepath)
+      let initChildj = newJournalWithParseStateFrom filepath cfilepath parentj
 
-      childInput <- lift $ readFilePortably filepath
-                            `orRethrowIOError` (show parentpos ++ " reading " ++ filepath)
-      let initChildj = newJournalWithParseStateFrom filepath parentj
-
-      -- Choose a reader/format based on the file path, or fall back
-      -- on journal. Duplicating readJournal a bit here.
+      -- Choose a reader based on the file path prefix or file extension,
+      -- defaulting to JournalReader. Duplicating readJournal a bit here.
       let r = fromMaybe reader $ findReader Nothing (Just prefixedpath)
-          parser = rParser r
-      dbg6IO "trying reader" (rFormat r)
+          parser = (rParser r) iopts1
+      dbg7IO "parseIncludedFile: trying reader" (rFormat r)
+
+      -- Parse the file (and its own includes, if any) to a Journal
+      -- with file path and source text attached. Or throw an error.
       updatedChildj <- journalAddFile (filepath, childInput) <$>
                         parseIncludeFile parser initChildj filepath childInput
 
-      -- discard child's parse info,  combine other fields
-      put $ updatedChildj <> parentj
+      -- Child journal was parsed successfully; now merge it into the parent journal.
+      -- Debug logging is provided for troubleshooting account display order (eg).
+      -- The parent journal is the second argument to journalConcat; this means
+      -- its parse state is kept, and its lists are appended to child's (which
+      -- ultimately produces the right list order, because parent's and child's
+      -- lists are in reverse order at this stage. Cf #1909)
+      let
+        parentj' =
+          dbgJournalAcctDeclOrder ("parseChild: child " <> childfilename <> " acct decls: ") updatedChildj
+          `journalConcat`
+          dbgJournalAcctDeclOrder ("parseChild: parent " <> parentfilename <> " acct decls: ") parentj
 
-    newJournalWithParseStateFrom :: FilePath -> Journal -> Journal
-    newJournalWithParseStateFrom filepath j = nulljournal{
-      jparsedefaultyear      = jparsedefaultyear j
-      ,jparsedefaultcommodity = jparsedefaultcommodity j
-      ,jparseparentaccounts   = jparseparentaccounts j
-      ,jparsedecimalmark      = jparsedecimalmark j
-      ,jparsealiases          = jparsealiases j
-      ,jcommodities           = jcommodities j
-      -- ,jparsetransactioncount = jparsetransactioncount j
-      ,jparsetimeclockentries = jparsetimeclockentries j
-      ,jincludefilestack      = filepath : jincludefilestack j
-      }
+          where
+            childfilename = takeFileName filepath
+            parentfilename = maybe "(unknown)" takeFileName $ fmap fst $ headMay $ jincludefilestack parentj  -- XXX more accurate than journalFilePath for some reason
 
--- | Lift an IO action into the exception monad, rethrowing any IO
--- error with the given message prepended.
-orRethrowIOError :: MonadIO m => IO a -> String -> TextParser m a
-orRethrowIOError io msg = do
+      -- And update the current parse state.
+      put parentj'
+
+      where
+        newJournalWithParseStateFrom :: FilePath -> FilePath -> Journal -> Journal
+        newJournalWithParseStateFrom filepath cfilepath j = nulljournal{
+          jparsedefaultyear      = jparsedefaultyear j
+          ,jparsedefaultcommodity = jparsedefaultcommodity j
+          ,jparseparentaccounts   = jparseparentaccounts j
+          ,jparsedecimalmark      = jparsedecimalmark j
+          ,jparsealiases          = jparsealiases j
+          ,jdeclaredcommodities           = jdeclaredcommodities j
+          -- ,jparsetransactioncount = jparsetransactioncount j
+          ,jparsetimeclockentries = jparsetimeclockentries j
+          ,jincludefilestack      = (filepath, cfilepath) : jincludefilestack j
+          }
+
+-- Get the absolute path of the file referenced by this parse position.
+-- (Symbolic links will not be dereferenced.)
+-- This probably will always succeed, since the parse file's path is probably always absolute.
+sourcePosFilePath :: (MonadIO m) => SourcePos -> m FilePath
+sourcePosFilePath = liftIO . makeAbsolute . sourceName
+
+-- | Lift an IO action into the exception monad, converting any IO error
+-- to a parse error message at the given offset.
+handleIOError :: MonadIO m => Int -> String -> IO a -> TextParser m a
+handleIOError off msg io = do
   eResult <- liftIO $ (Right <$> io) `C.catch` \(e::C.IOException) -> pure $ Left $ printf "%s:\n%s" msg (show e)
   case eResult of
     Right res -> pure res
-    Left errMsg -> Fail.fail errMsg
+    Left errMsg -> setOffset off >> fail errMsg
 
 -- Parse an account directive, adding its info to the journal's
 -- list of account declarations.
 accountdirectivep :: JournalParser m ()
 accountdirectivep = do
   off <- getOffset -- XXX figure out a more precise position later
+  pos <- getSourcePos
 
   string "account"
   lift skipNonNewlineSpaces1
 
   -- the account name, possibly modified by preceding alias or apply account directives
-  acct <- modifiedaccountnamep
-
-  -- maybe an account type code (ALERX) after two or more spaces
-  -- XXX added in 1.11, deprecated in 1.13, remove in 1.14
-  mtypecode :: Maybe Char <- lift $ optional $ try $ do
-    skipNonNewlineSpaces1 -- at least one more space in addition to the one consumed by modifiedaccountp
-    choice $ map char "ALERX"
+  acct <- (notFollowedBy (char '(' <|> char '[') <?> "account name without brackets") >>
+          modifiedaccountnamep True
 
   -- maybe a comment, on this and/or following lines
   (cmt, tags) <- lift transactioncommentp
@@ -362,11 +533,11 @@ accountdirectivep = do
   -- an account type may have been set by account type code or a tag;
   -- the latter takes precedence
   let
-    mtypecode' :: Maybe Text = lookup accountTypeTagName tags <|> (T.singleton <$> mtypecode)
-    metype = parseAccountTypeCode <$> mtypecode'
+    metype = parseAccountTypeCode <$> lookup accountTypeTagName tags
 
   -- update the journal
-  addAccountDeclaration (acct, cmt, tags)
+  addAccountDeclaration (acct, cmt, tags, pos)
+  unless (null tags) $ addDeclaredAccountTags acct tags
   case metype of
     Nothing         -> return ()
     Just (Right t)  -> addDeclaredAccountType acct t
@@ -378,33 +549,38 @@ accountTypeTagName = "type"
 parseAccountTypeCode :: Text -> Either String AccountType
 parseAccountTypeCode s =
   case T.toLower s of
-    "asset"     -> Right Asset
-    "a"         -> Right Asset
-    "liability" -> Right Liability
-    "l"         -> Right Liability
-    "equity"    -> Right Equity
-    "e"         -> Right Equity
-    "revenue"   -> Right Revenue
-    "r"         -> Right Revenue
-    "expense"   -> Right Expense
-    "x"         -> Right Expense
-    "cash"      -> Right Cash
-    "c"         -> Right Cash
-    _           -> Left err
+    "asset"      -> Right Asset
+    "a"          -> Right Asset
+    "liability"  -> Right Liability
+    "l"          -> Right Liability
+    "equity"     -> Right Equity
+    "e"          -> Right Equity
+    "revenue"    -> Right Revenue
+    "r"          -> Right Revenue
+    "expense"    -> Right Expense
+    "x"          -> Right Expense
+    "cash"       -> Right Cash
+    "c"          -> Right Cash
+    "conversion" -> Right Conversion
+    "v"          -> Right Conversion
+    "gains"      -> Right Gain
+    "g"          -> Right Gain
+    _            -> Left err
   where
     err = T.unpack $ "invalid account type code "<>s<>", should be one of " <>
-            T.intercalate ", " ["A","L","E","R","X","C","Asset","Liability","Equity","Revenue","Expense","Cash"]
+            T.intercalate ", " ["A","L","E","R","X","C","V","G","Asset","Liability","Equity","Revenue","Expense","Cash","Conversion","Gain"]
 
 -- Add an account declaration to the journal, auto-numbering it.
-addAccountDeclaration :: (AccountName,Text,[Tag]) -> JournalParser m ()
-addAccountDeclaration (a,cmt,tags) =
+addAccountDeclaration :: (AccountName,Text,[Tag],SourcePos) -> JournalParser m ()
+addAccountDeclaration (a,cmt,tags,pos) = do
   modify' (\j ->
              let
                decls = jdeclaredaccounts j
                d     = (a, nullaccountdeclarationinfo{
                               adicomment          = cmt
                              ,aditags             = tags
-                             ,adideclarationorder = length decls + 1
+                             ,adideclarationorder = length decls + 1  -- gets renumbered when Journals are finalised or merged
+                             ,adisourcepos        = pos
                              })
              in
                j{jdeclaredaccounts = d:decls})
@@ -419,6 +595,13 @@ addPayeeDeclaration (p, cmt, tags) =
                      pdicomment = cmt
                     ,pditags    = tags
                     })
+
+-- Add a tag declaration to the journal.
+addTagDeclaration :: (TagName,Text) -> JournalParser m ()
+addTagDeclaration (t, cmt) =
+  modify' (\j@Journal{jdeclaredtags} -> j{jdeclaredtags=tagandinfo:jdeclaredtags})
+  where
+    tagandinfo = (t, nulltagdeclarationinfo{tdicomment=cmt})
 
 indentedlinep :: JournalParser m String
 indentedlinep = lift skipNonNewlineSpaces1 >> (rstrip <$> lift restofline)
@@ -442,14 +625,16 @@ commoditydirectiveonelinep = do
     string "commodity"
     lift skipNonNewlineSpaces1
     off <- getOffset
-    amount <- amountp
-    pure $ (off, amount)
+    amt <- amountp
+    pure $ (off, amt)
   lift skipNonNewlineSpaces
-  _ <- lift followingcommentp
-  let comm = Commodity{csymbol=acommodity, cformat=Just $ dbg6 "style from commodity directive" astyle}
-  if isNothing $ asdecimalpoint astyle
+  (comment, tags) <- lift transactioncommentp
+  let comm = Commodity{csymbol=acommodity, cformat=Just $ dbg7 "style from commodity directive" astyle, ccomment=comment, ctags=tags}
+  if isNothing $ asdecimalmark astyle
   then customFailure $ parseErrorAt off pleaseincludedecimalpoint
-  else modify' (\j -> j{jcommodities=M.insert acommodity comm $ jcommodities j})
+  else modify' (\j -> j{jdeclaredcommodities=M.insert acommodity comm $ jdeclaredcommodities j
+                       ,jdeclaredcommoditytags=if null tags then jdeclaredcommoditytags j
+                                               else M.insert acommodity tags $ jdeclaredcommoditytags j})
 
 pleaseincludedecimalpoint :: String
 pleaseincludedecimalpoint = chomp $ unlines [
@@ -470,10 +655,14 @@ commoditydirectivemultilinep = do
   string "commodity"
   lift skipNonNewlineSpaces1
   sym <- lift commoditysymbolp
-  _ <- lift followingcommentp
-  mformat <- lastMay <$> many (indented $ formatdirectivep sym)
-  let comm = Commodity{csymbol=sym, cformat=mformat}
-  modify' (\j -> j{jcommodities=M.insert sym comm $ jcommodities j})
+  (comment, tags) <- lift transactioncommentp
+  -- read all subdirectives, saving format subdirectives as Lefts
+  subdirectives <- many $ indented (eitherP (formatdirectivep sym) (lift restofline))
+  let mfmt = lastMay $ lefts subdirectives
+  let comm = Commodity{csymbol=sym, cformat=mfmt, ccomment=comment, ctags=tags}
+  modify' (\j -> j{jdeclaredcommodities=M.insert sym comm $ jdeclaredcommodities j
+                  ,jdeclaredcommoditytags=if null tags then jdeclaredcommoditytags j
+                                          else M.insert sym tags $ jdeclaredcommoditytags j})
   where
     indented = (lift skipNonNewlineSpaces1 >>)
 
@@ -488,17 +677,46 @@ formatdirectivep expectedsym = do
   _ <- lift followingcommentp
   if acommodity==expectedsym
     then
-      if isNothing $ asdecimalpoint astyle
+      if isNothing $ asdecimalmark astyle
       then customFailure $ parseErrorAt off pleaseincludedecimalpoint
-      else return $ dbg6 "style from format subdirective" astyle
+      else return $ dbg7 "style from format subdirective" astyle
     else customFailure $ parseErrorAt off $
          printf "commodity directive symbol \"%s\" and format directive symbol \"%s\" should be the same" expectedsym acommodity
 
+-- More Ledger directives, ignore for now:
+-- apply fixed, apply tag, assert, bucket, A, capture, check, define, expr
+applyfixeddirectivep, endapplyfixeddirectivep, applytagdirectivep, endapplytagdirectivep,
+  assertdirectivep, bucketdirectivep, capturedirectivep, checkdirectivep, 
+  endapplyyeardirectivep, definedirectivep, exprdirectivep, valuedirectivep,
+  evaldirectivep, pythondirectivep, commandlineflagdirectivep
+  :: JournalParser m ()
+applyfixeddirectivep    = do string "apply fixed" >> lift restofline >> return ()
+endapplyfixeddirectivep = do string "end apply fixed" >> lift restofline >> return ()
+applytagdirectivep      = do string "apply tag" >> lift restofline >> return ()
+endapplytagdirectivep   = do string "end apply tag" >> lift restofline >> return ()
+endapplyyeardirectivep  = do string "end apply year" >> lift restofline >> return ()
+assertdirectivep        = do string "assert"  >> lift restofline >> return ()
+bucketdirectivep        = do string "A " <|> string "bucket " >> lift restofline >> return ()
+capturedirectivep       = do string "capture" >> lift restofline >> return ()
+checkdirectivep         = do string "check"   >> lift restofline >> return ()
+definedirectivep        = do string "define"  >> lift restofline >> return ()
+exprdirectivep          = do string "expr"    >> lift restofline >> return ()
+valuedirectivep         = do string "value"   >> lift restofline >> return ()
+evaldirectivep          = do string "eval"   >> lift restofline >> return ()
+commandlineflagdirectivep = do string "--" >> lift restofline >> return ()
+pythondirectivep = do
+  string "python" >> lift restofline
+  many $ indentedline <|> blankline
+  return ()
+  where
+    indentedline = lift skipNonNewlineSpaces1 >> lift restofline
+    blankline = lift skipNonNewlineSpaces >> newline >> return "" <?> "blank line"
+
 keywordp :: String -> JournalParser m ()
-keywordp = (() <$) . string . fromString
+keywordp = void . string . fromString
 
 spacesp :: JournalParser m ()
-spacesp = () <$ lift skipNonNewlineSpaces1
+spacesp = void $ lift skipNonNewlineSpaces1
 
 -- | Backtracking parser similar to string, but allows varying amount of space between words
 keywordsp :: String -> JournalParser m ()
@@ -533,28 +751,37 @@ tagdirectivep :: JournalParser m ()
 tagdirectivep = do
   string "tag" <?> "tag directive"
   lift skipNonNewlineSpaces1
-  _ <- lift $ some nonspace
-  lift restofline
+  tagname <- lift $ T.pack <$> some nonspace
+  (comment, _) <- lift transactioncommentp
+  skipMany indentedlinep
+  addTagDeclaration (tagname,comment)
   return ()
 
+-- end tag or end apply tag
 endtagdirectivep :: JournalParser m ()
-endtagdirectivep = do
-  (keywordsp "end tag" <|> keywordp "pop") <?> "end tag or pop directive"
-  lift restofline
+endtagdirectivep = (do
+  string "end"
+  lift skipNonNewlineSpaces1
+  optional $ string "apply" >> lift skipNonNewlineSpaces1
+  string "tag"
+  lift skipNonNewlineSpaces
+  eol
   return ()
+  ) <?> "end tag or end apply tag directive"
 
 payeedirectivep :: JournalParser m ()
 payeedirectivep = do
   string "payee" <?> "payee directive"
   lift skipNonNewlineSpaces1
-  payee <- lift $ T.strip <$> noncommenttext1p
+  payee <- lift $ T.strip <$> (try doublequotedtextp <|> noncommenttext1p)
   (comment, tags) <- lift transactioncommentp
+  skipMany indentedlinep
   addPayeeDeclaration (payee, comment, tags)
   return ()
 
 defaultyeardirectivep :: JournalParser m ()
 defaultyeardirectivep = do
-  char 'Y' <?> "default year"
+  (string "Y" <|> string "year" <|> string "apply year") <?> "default year"
   lift skipNonNewlineSpaces
   setYear =<< lift yearp
 
@@ -565,21 +792,22 @@ defaultcommoditydirectivep = do
   off <- getOffset
   Amount{acommodity,astyle} <- amountp
   lift restofline
-  if isNothing $ asdecimalpoint astyle
+  if isNothing $ asdecimalmark astyle
   then customFailure $ parseErrorAt off pleaseincludedecimalpoint
   else setDefaultCommodityAndStyle (acommodity, astyle)
 
 marketpricedirectivep :: JournalParser m PriceDirective
 marketpricedirectivep = do
+  pos <- getSourcePos
   char 'P' <?> "market price"
   lift skipNonNewlineSpaces
   date <- try (do {LocalTime d _ <- datetimep; return d}) <|> datep -- a time is ignored
   lift skipNonNewlineSpaces1
   symbol <- lift commoditysymbolp
-  lift skipNonNewlineSpaces
+  lift skipNonNewlineSpaces1
   price <- amountp
   lift restofline
-  return $ PriceDirective date symbol price
+  return $ PriceDirective pos date symbol price
 
 ignoredpricecommoditydirectivep :: JournalParser m ()
 ignoredpricecommoditydirectivep = do
@@ -636,12 +864,11 @@ transactionmodifierp = do
 -- relative to Y/1/1. If not, they are calculated related to today as usual.
 periodictransactionp :: MonadIO m => JournalParser m PeriodicTransaction
 periodictransactionp = do
+  startpos <- getSourcePos
 
   -- first line
   char '~' <?> "periodic transaction"
   lift $ skipNonNewlineSpaces
-  -- a period expression
-  off <- getOffset
 
   -- if there's a default year in effect, use Y/1/1 as base for partial/relative dates
   today <- liftIO getCurrentDay
@@ -656,7 +883,7 @@ periodictransactionp = do
   -- first parsing with 'singlespacedtextp', then "re-parsing" with
   -- 'periodexprp' saves 'periodexprp' from having to respect the single-
   -- and double-space parsing rules
-  (interval, span) <- lift $ reparseExcerpt periodExcerpt $ do
+  (interval, spn) <- lift $ reparseExcerpt periodExcerpt $ do
     pexp <- periodexprp refdate
     (<|>) eof $ do
       offset1 <- getOffset
@@ -668,11 +895,6 @@ periodictransactionp = do
         <> "\na double space is required between period expression and description/comment"
     pure pexp
 
-  -- In periodic transactions, the period expression has an additional constraint:
-  case checkPeriodicTransactionStartDate interval span periodtxt of
-    Just e -> customFailure $ parseErrorAt off e
-    Nothing -> pure ()
-
   status <- lift statusp <?> "cleared status"
   code <- lift codep <?> "transaction code"
   description <- lift $ T.strip <$> descriptionp
@@ -680,10 +902,14 @@ periodictransactionp = do
   -- next lines; use same year determined above
   postings <- postingsp (Just $ first3 $ toGregorian refdate)
 
+  endpos <- getSourcePos
+  let sourcepos = (startpos, endpos)
+
   return $ nullperiodictransaction{
      ptperiodexpr=periodtxt
     ,ptinterval=interval
-    ,ptspan=span
+    ,ptspan=spn
+    ,ptsourcepos=sourcepos
     ,ptstatus=status
     ,ptcode=code
     ,ptdescription=description
@@ -744,12 +970,12 @@ postingphelper isPostingRule mTransactionYear = do
       lift skipNonNewlineSpaces1
       status <- lift statusp
       lift skipNonNewlineSpaces
-      account <- modifiedaccountnamep
+      account <- modifiedaccountnamep True
       return (status, account)
     let (ptype, account') = (accountNamePostingType account, textUnbracket account)
     lift skipNonNewlineSpaces
     mult <- if isPostingRule then multiplierp else pure False
-    amount <- optional $ amountpwithmultiplier mult
+    amt <- optional $ amountp' mult
     lift skipNonNewlineSpaces
     massertion <- optional balanceassertionp
     lift skipNonNewlineSpaces
@@ -759,7 +985,7 @@ postingphelper isPostingRule mTransactionYear = do
             , pdate2=mdate2
             , pstatus=status
             , paccount=account'
-            , pamount=maybe missingmixedamt mixedAmount amount
+            , pamount=maybe missingmixedamt mixedAmount amt
             , pcomment=comment
             , ptype=ptype
             , ptags=tags
@@ -798,8 +1024,8 @@ tests_JournalReader = testGroup "JournalReader" [
     ]
   ,testCase "datetimep" $ do
      let
-       good = assertParse datetimep
-       bad  = (\t -> assertParseError datetimep t "")
+       good  = assertParse datetimep
+       bad t = assertParseError datetimep t ""
      good "2011/1/1 00:00"
      good "2011/1/1 23:59:59"
      bad "2011/1/1"
@@ -819,7 +1045,8 @@ tests_JournalReader = testGroup "JournalReader" [
       nullperiodictransaction {
          ptperiodexpr  = "monthly from 2018/6"
         ,ptinterval    = Months 1
-        ,ptspan        = DateSpan (Just $ fromGregorian 2018 6 1) Nothing
+        ,ptspan        = DateSpan (Just $ Flex $ fromGregorian 2018 6 1) Nothing
+        ,ptsourcepos   = (SourcePos "" (mkPos 1) (mkPos 1), SourcePos "" (mkPos 2) (mkPos 1))
         ,ptdescription = ""
         ,ptcomment     = "In 2019 we will change this\n"
         }
@@ -829,7 +1056,8 @@ tests_JournalReader = testGroup "JournalReader" [
       nullperiodictransaction {
          ptperiodexpr  = "monthly from 2018/6"
         ,ptinterval    = Months 1
-        ,ptspan        = DateSpan (Just $ fromGregorian 2018 6 1) Nothing
+        ,ptspan        = DateSpan (Just $ Flex $ fromGregorian 2018 6 1) Nothing
+        ,ptsourcepos   = (SourcePos "" (mkPos 1) (mkPos 1), SourcePos "" (mkPos 2) (mkPos 1))
         ,ptdescription = "In 2019 we will change this"
         ,ptcomment     = ""
         }
@@ -840,6 +1068,7 @@ tests_JournalReader = testGroup "JournalReader" [
          ptperiodexpr  = "monthly"
         ,ptinterval    = Months 1
         ,ptspan        = DateSpan Nothing Nothing
+        ,ptsourcepos   = (SourcePos "" (mkPos 1) (mkPos 1), SourcePos "" (mkPos 2) (mkPos 1))
         ,ptdescription = "Next year blah blah"
         ,ptcomment     = ""
         }
@@ -849,7 +1078,8 @@ tests_JournalReader = testGroup "JournalReader" [
       nullperiodictransaction {
          ptperiodexpr  = "2019-01-04"
         ,ptinterval    = NoInterval
-        ,ptspan        = DateSpan (Just $ fromGregorian 2019 1 4) (Just $ fromGregorian 2019 1 5)
+        ,ptspan        = DateSpan (Just $ Exact $ fromGregorian 2019 1 4) (Just $ Exact $ fromGregorian 2019 1 5)
+        ,ptsourcepos   = (SourcePos "" (mkPos 1) (mkPos 1), SourcePos "" (mkPos 2) (mkPos 1))
         ,ptdescription = ""
         ,ptcomment     = ""
         }
@@ -1001,19 +1231,20 @@ tests_JournalReader = testGroup "JournalReader" [
 
   ,testGroup "directivep" [
     testCase "supports !" $ do
-        assertParseE directivep "!account a\n"
-        assertParseE directivep "!D 1.0\n"
+        assertParseE (directivep definputopts) "!account a\n"
+        assertParseE (directivep definputopts) "!D 1.0\n"
      ]
 
   ,testGroup "accountdirectivep" [
        testCase "with-comment"       $ assertParse accountdirectivep "account a:b  ; a comment\n"
       ,testCase "does-not-support-!" $ assertParseError accountdirectivep "!account a:b\n" ""
-      ,testCase "account-type-code"  $ assertParse accountdirectivep "account a:b  A\n"
+      ,testCase "account-type-code"  $ assertParse accountdirectivep "account a:b  ; type:A\n"
       ,testCase "account-type-tag"   $ assertParseStateOn accountdirectivep "account a:b  ; type:asset\n"
         jdeclaredaccounts
         [("a:b", AccountDeclarationInfo{adicomment          = "type:asset\n"
                                        ,aditags             = [("type","asset")]
                                        ,adideclarationorder = 1
+                                       ,adisourcepos        = nullsourcepos
                                        })
         ]
       ]
@@ -1035,21 +1266,24 @@ tests_JournalReader = testGroup "JournalReader" [
      assertParse ignoredpricecommoditydirectivep "N $\n"
 
   ,testGroup "includedirectivep" [
-      testCase "include" $ assertParseErrorE includedirectivep "include nosuchfile\n" "No existing files match pattern: nosuchfile"
-     ,testCase "glob" $ assertParseErrorE includedirectivep "include nosuchfile*\n" "No existing files match pattern: nosuchfile*"
+      testCase "include" $ assertParseErrorE (includedirectivep definputopts) "include nosuchfile\n" "No files were matched by: nosuchfile"
+     ,testCase "glob" $ assertParseErrorE (includedirectivep definputopts) "include nosuchfile*\n" "No files were matched by: nosuchfile*"
      ]
 
   ,testCase "marketpricedirectivep" $ assertParseEq marketpricedirectivep
     "P 2017/01/30 BTC $922.83\n"
     PriceDirective{
+      pdsourcepos = nullsourcepos,
       pddate      = fromGregorian 2017 1 30,
       pdcommodity = "BTC",
       pdamount    = usd 922.83
       }
 
   ,testGroup "payeedirectivep" [
-       testCase "simple"             $ assertParse payeedirectivep "payee foo\n"
+        testCase "simple"             $ assertParse payeedirectivep "payee foo\n"
        ,testCase "with-comment"       $ assertParse payeedirectivep "payee foo ; comment\n"
+       ,testCase "double-quoted"      $ assertParse payeedirectivep "payee \"a b\"\n"
+       ,testCase "empty        "      $ assertParse payeedirectivep "payee \"\"\n"
        ]
 
   ,testCase "tagdirectivep" $ do
@@ -1057,15 +1291,15 @@ tests_JournalReader = testGroup "JournalReader" [
 
   ,testCase "endtagdirectivep" $ do
       assertParse endtagdirectivep "end tag \n"
-      assertParse endtagdirectivep "pop \n"
+      assertParse endtagdirectivep "end apply tag \n"
 
   ,testGroup "journalp" [
-    testCase "empty file" $ assertParseEqE journalp "" nulljournal
+    testCase "empty file" $ assertParseEqE (journalp definputopts) "" nulljournal
     ]
 
    -- these are defined here rather than in Common so they can use journalp
   ,testCase "parseAndFinaliseJournal" $ do
-      ej <- runExceptT $ parseAndFinaliseJournal journalp definputopts "" "2019-1-1\n"
+      ej <- runExceptT $ parseAndFinaliseJournal (journalp definputopts) definputopts "" "2019-1-1\n"
       let Right j = ej
       assertEqual "" [""] $ journalFilePaths j
 

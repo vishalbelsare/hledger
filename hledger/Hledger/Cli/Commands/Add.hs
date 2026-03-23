@@ -1,10 +1,16 @@
 {-|
-A history-aware add command to help with data entry.
-|-}
+A history-aware, tab-completing interactive add command to help with data entry.
+-}
 
 {-# OPTIONS_GHC -fno-warn-missing-signatures -fno-warn-unused-do-bind #-}
-{-# LANGUAGE ScopedTypeVariables, RecordWildCards, TypeOperators, FlexibleContexts, OverloadedStrings, PackageImports, LambdaCase #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PackageImports #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Hledger.Cli.Commands.Add (
    addmode
@@ -22,21 +28,21 @@ import Control.Monad.Trans (liftIO)
 import Data.Char (toUpper, toLower)
 import Data.Either (isRight)
 import Data.Functor.Identity (Identity(..))
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, nub)
 import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.IO as TL
-import Data.Time.Calendar (Day)
-import Data.Time.Format (formatTime, defaultTimeLocale, iso8601DateFormat)
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.IO qualified as TL
+import Data.Time.Calendar (Day, toGregorian)
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import Lens.Micro ((^.))
-import Safe (headDef, headMay, atMay)
+import Safe (headDef, headMay, atMay, lastMay)
 import System.Console.CmdArgs.Explicit (flagNone)
 import System.Console.Haskeline (runInputT, defaultSettings, setComplete)
 import System.Console.Haskeline.Completion (CompletionFunc, completeWord, isFinished, noCompletion, simpleCompletion)
-import System.Console.Wizard (Wizard, defaultTo, line, output, retryMsg, linePrewritten, nonEmpty, parser, run)
+import System.Console.Wizard (Wizard, defaultTo, line, output, outputLn, retryMsg, linePrewritten, nonEmpty, parser, run)
 import System.Console.Wizard.Haskeline
 import System.IO ( stderr, hPutStr, hPutStrLn )
 import Text.Megaparsec
@@ -53,29 +59,52 @@ addmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Add.txt")
   [flagNone ["no-new-accounts"]  (setboolopt "no-new-accounts") "don't allow creating new accounts"]
   [generalflagsgroup2]
-  []
-  ([], Just $ argsFlag "[DATE [DESCRIPTION [ACCOUNT1 [AMOUNT1 [ACCOUNT2 [ETC...]]]]]]")
+  confflags
+  ([], Just $ argsFlag "[-f JOURNALFILE] [DATE [DESCRIPTION [ACCOUNT1 [ETC..]]]]]")
 
--- | State used while entering transactions.
-data EntryState = EntryState {
-   esOpts               :: CliOpts           -- ^ command line options
-  ,esArgs               :: [String]          -- ^ command line arguments remaining to be used as defaults
-  ,esToday              :: Day               -- ^ today's date
-  ,esDefDate            :: Day               -- ^ the default date for next transaction
-  ,esJournal            :: Journal           -- ^ the journal we are adding to
-  ,esSimilarTransaction :: Maybe Transaction -- ^ the most similar historical txn
-  ,esPostings           :: [Posting]         -- ^ postings entered so far in the current txn
-  } deriving (Show)
+data AddState = AddState {
+   asOpts               :: CliOpts           -- ^ command line options
+  ,asArgs               :: [String]          -- ^ command line arguments remaining to be used as defaults
+  ,asToday              :: Day               -- ^ today's date
+  ,asDefDate            :: Day               -- ^ the default date to use for the next transaction
+  ,asJournal            :: Journal           -- ^ the journal we are adding to
+  ,asSimilarTransaction :: Maybe Transaction -- ^ the old transaction most similar to the new one being entered
+  ,asPostings           :: [Posting]         -- ^ the new postings entered so far
+} deriving (Show)
 
-defEntryState = EntryState {
-   esOpts               = defcliopts
-  ,esArgs               = []
-  ,esToday              = nulldate
-  ,esDefDate            = nulldate
-  ,esJournal            = nulljournal
-  ,esSimilarTransaction = Nothing
-  ,esPostings           = []
+defAddState = AddState {
+   asOpts               = defcliopts
+  ,asArgs               = []
+  ,asToday              = nulldate
+  ,asDefDate            = nulldate
+  ,asJournal            = nulljournal
+  ,asSimilarTransaction = Nothing
+  ,asPostings           = []
 }
+
+data AddStep =
+    GetDate
+  | GetDescription (Day, Text)
+  | GetPosting TxnData (Maybe Posting)
+  | GetAccount TxnData
+  | GetAmount TxnData String
+  | Confirm Transaction
+
+data TxnData = TxnData {
+    txnDate :: Day
+  , txnCode :: Text
+  , txnDesc :: Text
+  , txnCmnt :: Text
+} deriving (Show)
+
+type Comment = (Text, [Tag], Maybe Day, Maybe Day)
+
+data PrevInput = PrevInput {
+    prevDateAndCode   :: Maybe String
+  , prevDescAndCmnt   :: Maybe String
+  , prevAccount       :: [String]
+  , prevAmountAndCmnt :: [String]
+} deriving (Show)
 
 data RestartTransactionException = RestartTransactionException deriving (Show)
 instance Exception RestartTransactionException
@@ -93,13 +122,13 @@ add opts j
         hPutStrLn stderr $ "Adding transactions to journal file " <> journalFilePath j
         showHelp
         let today = opts^.rsDay
-            es = defEntryState{esOpts=opts
-                              ,esArgs=listofstringopt "args" $ rawopts_ opts
-                              ,esToday=today
-                              ,esDefDate=today
-                              ,esJournal=j
+            state = defAddState{asOpts=opts
+                              ,asArgs=listofstringopt "args" $ rawopts_ opts
+                              ,asToday=today
+                              ,asDefDate=today
+                              ,asJournal=j
                               }
-        getAndAddTransactions es `E.catch` (\(_::UnexpectedEOF) -> putStr "")
+        addTransactionsLoop state `E.catch` (\(_::UnexpectedEOF) -> putStr "")
 
 showHelp = hPutStr stderr $ unlines [
      "Any command line arguments will be used as defaults."
@@ -116,155 +145,165 @@ showHelp = hPutStr stderr $ unlines [
 -- ctrl-c (then raise an EOF exception).  If provided, command-line
 -- arguments are used as defaults; otherwise defaults come from the
 -- most similar recent transaction in the journal.
-getAndAddTransactions :: EntryState -> IO ()
-getAndAddTransactions es@EntryState{..} = (do
+addTransactionsLoop :: AddState -> IO ()
+addTransactionsLoop state@AddState{..} = (do
   let defaultPrevInput = PrevInput{prevDateAndCode=Nothing, prevDescAndCmnt=Nothing, prevAccount=[], prevAmountAndCmnt=[]}
-  mt <- runInputT (setComplete noCompletion defaultSettings) (System.Console.Wizard.run $ haskeline $ confirmedTransactionWizard defaultPrevInput es [])
+  mt <- runInputT (setComplete noCompletion defaultSettings) (System.Console.Wizard.run $ haskeline $ transactionWizard defaultPrevInput state [])
   case mt of
-    Nothing -> error "Could not interpret the input, restarting"  -- caught below causing a restart, I believe  -- PARTIAL:
+    Nothing -> error' "Could not interpret the input, restarting"  -- caught below causing a restart, I believe  -- PARTIAL:
     Just t -> do
-      j <- if debug_ esOpts > 0
+      j <- if debug_ asOpts > 0
            then do hPutStrLn stderr "Skipping journal add due to debug mode."
-                   return esJournal
-           else do j' <- journalAddTransaction esJournal esOpts t
+                   return asJournal
+           else do j' <- journalAddTransaction asJournal asOpts t
                    hPutStrLn stderr "Saved."
                    return j'
       hPutStrLn stderr "Starting the next transaction (. or ctrl-D/ctrl-C to quit)"
-      getAndAddTransactions es{esJournal=j, esDefDate=tdate t}
+      addTransactionsLoop state{asJournal=j, asDefDate=tdate t}
   )
   `E.catch` (\(_::RestartTransactionException) ->
-                 hPutStrLn stderr "Restarting this transaction." >> getAndAddTransactions es)
+                 hPutStrLn stderr "Restarting this transaction." >> addTransactionsLoop state)
 
-data TxnParams = TxnParams
-  { txnDate :: Day
-  , txnCode :: Text
-  , txnDesc :: Text
-  , txnCmnt :: Text
-  } deriving (Show)
-
-data PrevInput = PrevInput
-  { prevDateAndCode   :: Maybe String
-  , prevDescAndCmnt   :: Maybe String
-  , prevAccount       :: [String]
-  , prevAmountAndCmnt :: [String]
-  } deriving (Show)
-
-data AddingStage = EnterDateAndCode
-                 | EnterDescAndComment (Day, Text)
-                 | EnterAccount TxnParams
-                 | EnterAmountAndComment TxnParams String
-                 | EndStage Transaction
-                 | EnterNewPosting TxnParams (Maybe Posting)
-
-confirmedTransactionWizard :: PrevInput -> EntryState -> [AddingStage] -> Wizard Haskeline Transaction
-confirmedTransactionWizard prevInput es [] = confirmedTransactionWizard prevInput es [EnterDateAndCode]
-confirmedTransactionWizard prevInput es@EntryState{..} stack@(currentStage : _) = case currentStage of
-  EnterDateAndCode -> dateAndCodeWizard prevInput es >>= \case
-    Just (date, code) -> do
-      let es' = es
-            { esArgs = drop 1 esArgs
-            , esDefDate = date
-            }
-          dateAndCodeString = formatTime defaultTimeLocale yyyymmddFormat date
+-- | Interact with the user to get a Transaction.
+transactionWizard :: PrevInput -> AddState -> [AddStep] -> Wizard Haskeline Transaction
+transactionWizard previnput state [] = transactionWizard previnput state [GetDate]
+transactionWizard previnput state@AddState{..} stack@(currentStage : _) = case currentStage of
+  GetDate -> dateWizard previnput state >>= \case
+    Just (efd, code) -> do
+      let
+        date = fromEFDay efd
+        state' = state{ asArgs = drop 1 asArgs
+                , asDefDate = date
+                }
+        dateAndCodeString = formatTime defaultTimeLocale yyyymmddFormat date
                             ++ T.unpack (if T.null code then "" else " (" <> code <> ")")
-          yyyymmddFormat = iso8601DateFormat Nothing
-      confirmedTransactionWizard prevInput{prevDateAndCode=Just dateAndCodeString} es' (EnterDescAndComment (date, code) : stack)
+        yyyymmddFormat = "%Y-%m-%d"
+      transactionWizard previnput{prevDateAndCode=Just dateAndCodeString} state' (GetDescription (date, code) : stack)
     Nothing ->
-      confirmedTransactionWizard prevInput es stack
+      transactionWizard previnput state stack
 
-  EnterDescAndComment (date, code) -> descriptionAndCommentWizard prevInput es >>= \case
+  GetDescription (date, code) -> descriptionWizard previnput state >>= \case
     Just (desc, comment) -> do
-      let mbaset = journalSimilarTransaction esOpts esJournal desc
-          es' = es
-            { esArgs = drop 1 esArgs
-            , esPostings = []
-            , esSimilarTransaction = mbaset
+      let mbaset = journalSimilarTransaction asOpts asJournal desc
+          state' = state
+            { asArgs = drop 1 asArgs
+            , asPostings = []
+            , asSimilarTransaction = mbaset
             }
           descAndCommentString = T.unpack $ desc <> (if T.null comment then "" else "  ; " <> comment)
-          prevInput' = prevInput{prevDescAndCmnt=Just descAndCommentString}
+          previnput' = previnput{prevDescAndCmnt=Just descAndCommentString}
       when (isJust mbaset) . liftIO $ do
           hPutStrLn stderr "Using this similar transaction for defaults:"
           T.hPutStr stderr $ showTransaction (fromJust mbaset)
-      confirmedTransactionWizard prevInput' es' ((EnterNewPosting TxnParams{txnDate=date, txnCode=code, txnDesc=desc, txnCmnt=comment} Nothing) : stack)
+      transactionWizard previnput' state' ((GetPosting TxnData{txnDate=date, txnCode=code, txnDesc=desc, txnCmnt=comment} Nothing) : stack)
     Nothing ->
-      confirmedTransactionWizard prevInput es (drop 1 stack)
+      transactionWizard previnput state (drop 1 stack)
 
-  EnterNewPosting txnParams@TxnParams{..} posting -> case (esPostings, posting) of
+  GetPosting txndata@TxnData{..} p -> case (asPostings, p) of
     ([], Nothing) ->
-      confirmedTransactionWizard prevInput es (EnterAccount txnParams : stack)
+      transactionWizard previnput state (GetAccount txndata : stack)
     (_, Just _) ->
-      confirmedTransactionWizard prevInput es (EnterAccount txnParams : stack)
+      transactionWizard previnput state (GetAccount txndata : stack)
     (_, Nothing) -> do
       let t = nulltransaction{tdate=txnDate
                              ,tstatus=Unmarked
                              ,tcode=txnCode
                              ,tdescription=txnDesc
                              ,tcomment=txnCmnt
-                             ,tpostings=esPostings
+                             ,tpostings=asPostings
                              }
-      case balanceTransaction defbalancingopts t of -- imprecise balancing (?)
+          bopts = balancingopts_ (inputopts_ asOpts)
+      case balanceTransactionInJournal t asJournal bopts of
         Right t' ->
-          confirmedTransactionWizard prevInput es (EndStage t' : stack)
+          transactionWizard previnput state (Confirm t' : stack)
         Left err -> do
-          liftIO (hPutStrLn stderr $ "\n" ++ (capitalize err) ++ "please re-enter.")
+          liftIO (hPutStrLn stderr $ "\n" ++ (capitalize err) ++ ", please re-enter.")
           let notFirstEnterPost stage = case stage of
-                EnterNewPosting _ Nothing -> False
+                GetPosting _ Nothing -> False
                 _ -> True
-          confirmedTransactionWizard prevInput es{esPostings=[]} (dropWhile notFirstEnterPost stack)
+          transactionWizard previnput state{asPostings=[]} (dropWhile notFirstEnterPost stack)
 
-  EnterAccount txnParams -> accountWizard prevInput es >>= \case
+  GetAccount txndata -> accountWizard previnput state >>= \case
     Just account
       | account `elem` [".", ""] ->
-          case (esPostings, postingsBalanced esPostings) of
-            ([],_)    -> liftIO (hPutStrLn stderr "Please enter some postings first.") >> confirmedTransactionWizard prevInput es stack
-            (_,False) -> liftIO (hPutStrLn stderr "Please enter more postings to balance the transaction.") >> confirmedTransactionWizard prevInput es stack
-            (_,True)  -> confirmedTransactionWizard prevInput es (EnterNewPosting txnParams Nothing : stack)
+          case (asPostings, postingsAreBalanced asPostings) of
+            ([],_)    -> liftIO (hPutStrLn stderr "Please enter some postings first.") >> transactionWizard previnput state stack
+            (_,False) -> liftIO (hPutStrLn stderr "Please enter more postings to balance the transaction.") >> transactionWizard previnput state stack
+            (_,True)  -> transactionWizard previnput state (GetPosting txndata Nothing : stack)
       | otherwise -> do
-          let prevAccount' = replaceNthOrAppend (length esPostings) account (prevAccount prevInput)
-          confirmedTransactionWizard prevInput{prevAccount=prevAccount'} es{esArgs=drop 1 esArgs} (EnterAmountAndComment txnParams account : stack)
+          let prevAccount' = replaceNthOrAppend (length asPostings) account (prevAccount previnput)
+          transactionWizard previnput{prevAccount=prevAccount'} state{asArgs=drop 1 asArgs} (GetAmount txndata account : stack)
     Nothing -> do
-      let notPrevAmountAndNotEnterDesc stage = case stage of
-            EnterAmountAndComment _ _ -> False
-            EnterDescAndComment _ -> False
+      let notPrevAmountAndNotGetDesc stage = case stage of
+            GetAmount _ _ -> False
+            GetDescription _ -> False
             _ -> True
-      confirmedTransactionWizard prevInput es{esPostings=init esPostings} (dropWhile notPrevAmountAndNotEnterDesc stack)
+      transactionWizard previnput state{asPostings=init asPostings} (dropWhile notPrevAmountAndNotGetDesc stack)
 
-  EnterAmountAndComment txnParams account -> amountAndCommentWizard prevInput es >>= \case
-    Just (amount, comment) -> do
-      let posting = nullposting{paccount=T.pack $ stripbrackets account
-                               ,pamount=mixedAmount amount
-                               ,pcomment=comment
-                               ,ptype=accountNamePostingType $ T.pack account
-                               }
-          amountAndCommentString = showAmount amount ++ T.unpack (if T.null comment then "" else "  ;" <> comment)
-          prevAmountAndCmnt' = replaceNthOrAppend (length esPostings) amountAndCommentString (prevAmountAndCmnt prevInput)
-          es' = es{esPostings=esPostings++[posting], esArgs=drop 2 esArgs}
-      confirmedTransactionWizard prevInput{prevAmountAndCmnt=prevAmountAndCmnt'} es' (EnterNewPosting txnParams (Just posting) : stack)
-    Nothing -> confirmedTransactionWizard prevInput es (drop 1 stack)
+  GetAmount txndata account -> amountWizard previnput state >>= \case
+    Just (mamt, assertion, (comment, tags, pdate1, pdate2)) -> do
+      let mixedamt = maybe missingmixedamt mixedAmount mamt
+          p = nullposting{paccount=T.pack $ stripbrackets account
+                          ,pamount=mixedamt
+                          ,pcomment=T.dropAround isNewline comment
+                          ,ptype=accountNamePostingType $ T.pack account
+                          ,pbalanceassertion = assertion
+                          ,pdate=pdate1
+                          ,pdate2=pdate2
+                          ,ptags=tags
+                          }
+          amountAndCommentString = showMixedAmountOneLine mixedamt ++ T.unpack (if T.null comment then "" else "  ;" <> comment)
+          prevAmountAndCmnt' = replaceNthOrAppend (length asPostings) amountAndCommentString (prevAmountAndCmnt previnput)
+          state' = state{asPostings=asPostings++[p], asArgs=drop 1 asArgs}
+          -- Include a dummy posting to balance the unfinished transation in assertion checking
+          dummytxn = nulltransaction{tpostings = asPostings ++ [p, post "" missingamt]
+                                     ,tdate = txnDate txndata
+                                     ,tdescription = txnDesc txndata }
+          bopts = balancingopts_ (inputopts_ asOpts)
+          balanceassignment = mixedamt==missingmixedamt && isJust assertion
+          etxn
+            -- If the new posting is doing a balance assignment,
+            -- don't attempt to balance the transaction or check assertions yet
+            | balanceassignment = Right dummytxn
+            -- Otherwise, balance the transaction in context of the whole journal,
+            -- maybe filling its balance assignments if any,
+            -- and maybe checking all the journal's balance assertions.
+            | otherwise = balanceTransactionInJournal dummytxn asJournal bopts
 
-  EndStage t -> do
+      case etxn of
+        Left err -> do
+          liftIO (hPutStrLn stderr err)
+          transactionWizard previnput state (GetAmount txndata account : stack)
+        Right _ -> 
+          transactionWizard previnput{prevAmountAndCmnt=prevAmountAndCmnt'} state' (GetPosting txndata (Just posting) : stack)
+    Nothing -> transactionWizard previnput state (drop 1 stack)
+
+  Confirm t -> do
     output . T.unpack $ showTransaction t
     y <- let def = "y" in
          retryMsg "Please enter y or n." $
           parser ((fmap (\c -> if c == '<' then Nothing else Just c)) . headMay . map toLower . strip) $
           defaultTo' def $ nonEmpty $
-          line $ green $ printf "Save this transaction to the journal ?%s: " (showDefault def)
+          line $ green' $ printf "Save this transaction to the journal ?%s: " (showDefault def)
     case y of
       Just 'y' -> return t
       Just _   -> throw RestartTransactionException
-      Nothing  -> confirmedTransactionWizard prevInput es (drop 2 stack)
+      Nothing  -> transactionWizard previnput state (drop 2 stack)
   where
     replaceNthOrAppend n newElem xs = take n xs ++ [newElem] ++ drop (n + 1) xs
 
-dateAndCodeWizard PrevInput{..} EntryState{..} = do
-  let def = headDef (T.unpack $ showDate esDefDate) esArgs
-  retryMsg "A valid hledger smart date is required. Eg: 2014/2/14, 14, yesterday." $
-   parser (parseSmartDateAndCode esToday) $
+-- | Interact with the user to get a transaction date (accepting smart dates), maybe followed by a " (CODE)". 
+-- Returns the date and the code, or nothing if the input was "<".
+dateWizard :: PrevInput -> AddState -> Wizard Haskeline (Maybe (EFDay, Text))
+dateWizard PrevInput{..} AddState{..} = do
+  let def = headDef (T.unpack $ showDate asDefDate) asArgs
+  retryMsg "A valid hledger smart date is required. Eg: 2022-08-30, 8/30, 30, yesterday." $
+   parser (parseSmartDateAndCode asToday) $
    withCompletion (dateCompleter def) $
    defaultTo' def $ nonEmpty $
    maybeExit $
    -- maybeShowHelp $
-   linePrewritten (green $ printf "Date%s: " (showDefault def)) (fromMaybe "" prevDateAndCode) ""
+   linePrewritten (green' $ printf "Date%s: " (showDefault def)) (fromMaybe "" prevDateAndCode) ""
     where
       parseSmartDateAndCode refdate s = if s == "<" then return Nothing else either (const Nothing) (\(d,c) -> return $ Just (fixSmartDate refdate d, c)) edc
           where
@@ -279,88 +318,105 @@ dateAndCodeWizard PrevInput{..} EntryState{..} = do
       -- defday = fixSmartDate today $ fromparse $ (parse smartdate "" . lowercase) defdate
       -- datestr = showDate $ fixSmartDate defday smtdate
 
-descriptionAndCommentWizard PrevInput{..} EntryState{..} = do
-  let def = headDef "" esArgs
-  s <- withCompletion (descriptionCompleter esJournal def) $
+-- | Interact with the user to get a transaction description, maybe followed by a "; COMMENT".
+-- Returns the possibly empty description and comment, or nothing if the input is "<".
+descriptionWizard :: PrevInput -> AddState -> Wizard Haskeline (Maybe (Text, Text))
+descriptionWizard PrevInput{..} AddState{..} = do
+  let def = headDef "" asArgs
+  s <- withCompletion (descriptionCompleter asJournal def) $
        defaultTo' def $ nonEmpty $
-       linePrewritten (green $ printf "Description%s: " (showDefault def)) (fromMaybe "" prevDescAndCmnt) ""
+       linePrewritten (green' $ printf "Description%s: " (showDefault def)) (fromMaybe "" prevDescAndCmnt) ""
   if s == "<"
     then return Nothing
     else do
       let (desc,comment) = (T.pack $ strip a, T.pack $ strip $ dropWhile (==';') b) where (a,b) = break (==';') s
       return $ Just (desc, comment)
 
-postingsBalanced :: [Posting] -> Bool
-postingsBalanced ps = isRight $ balanceTransaction defbalancingopts nulltransaction{tpostings=ps}
-
-accountWizard PrevInput{..} EntryState{..} = do
-  let pnum = length esPostings + 1
-      historicalp = fmap ((!! (pnum - 1)) . (++ (repeat nullposting)) . tpostings) esSimilarTransaction
+-- | Interact with the user to get an account name, possibly enclosed in "()" or "[]".
+-- Returns the account name, or nothing if the input is "<".
+accountWizard :: PrevInput -> AddState -> Wizard Haskeline (Maybe String)
+accountWizard PrevInput{..} AddState{..} = do
+  let pnum = length asPostings + 1
+      historicalp = fmap ((!! (pnum - 1)) . (++ (repeat nullposting)) . tpostings) asSimilarTransaction
       historicalacct = case historicalp of Just p  -> showAccountName Nothing (ptype p) (paccount p)
                                            Nothing -> ""
-      def = headDef (T.unpack historicalacct) esArgs
+      def = headDef (T.unpack historicalacct) asArgs
       endmsg | canfinish && null def = " (or . or enter to finish this transaction)"
              | canfinish             = " (or . to finish this transaction)"
              | otherwise             = ""
   retryMsg "A valid hledger account name is required. Eg: assets:cash, expenses:food:eating out." $
    parser (parseAccountOrDotOrNull def canfinish) $
-   withCompletion (accountCompleter esJournal def) $
+   withCompletion (accountCompleter asJournal def) $
    defaultTo' def $ -- nonEmpty $
-   linePrewritten (green $ printf "Account %d%s%s: " pnum (endmsg::String) (showDefault def)) (fromMaybe "" $ prevAccount `atMay` length esPostings) ""
+   linePrewritten (green' $ printf "Account %d%s%s: " pnum (endmsg::String) (showDefault def)) (fromMaybe "" $ prevAccount `atMay` length asPostings) ""
     where
-      canfinish = not (null esPostings) && postingsBalanced esPostings
+      canfinish = not (null asPostings) && postingsAreBalanced asPostings
       parseAccountOrDotOrNull :: String -> Bool -> String -> Maybe (Maybe String)
-      parseAccountOrDotOrNull _  _ "<"       = dbg1 $ Just Nothing
-      parseAccountOrDotOrNull _  _ "."       = dbg1 $ Just $ Just "." -- . always signals end of txn
-      parseAccountOrDotOrNull "" True ""     = dbg1 $ Just $ Just ""  -- when there's no default and txn is balanced, "" also signals end of txn
-      parseAccountOrDotOrNull def@(_:_) _ "" = dbg1 $ Just $ Just def -- when there's a default, "" means use that
-      parseAccountOrDotOrNull _ _ s          = dbg1 $ fmap (Just . T.unpack) $
+      parseAccountOrDotOrNull _  _ "<"       = dbg' $ Just Nothing
+      parseAccountOrDotOrNull _  _ "."       = dbg' $ Just $ Just "." -- . always signals end of txn
+      parseAccountOrDotOrNull "" True ""     = dbg' $ Just $ Just ""  -- when there's no default and txn is balanced, "" also signals end of txn
+      parseAccountOrDotOrNull def@(_:_) _ "" = dbg' $ Just $ Just def -- when there's a default, "" means use that
+      parseAccountOrDotOrNull _ _ s          = dbg' $ fmap (Just . T.unpack) $
         either (const Nothing) validateAccount $
-          flip evalState esJournal $ runParserT (accountnamep <* eof) "" (T.pack s) -- otherwise, try to parse the input as an accountname
+          flip evalState asJournal $ runParserT (accountnamep <* eof) "" (T.pack s) -- otherwise, try to parse the input as an accountname
         where
           validateAccount :: Text -> Maybe Text
-          validateAccount t | no_new_accounts_ esOpts && notElem t (journalAccountNamesDeclaredOrImplied esJournal) = Nothing
+          validateAccount t | no_new_accounts_ asOpts && notElem t (journalAccountNamesDeclaredOrImplied asJournal) = Nothing
                             | otherwise = Just t
-      dbg1 = id -- strace
+      dbg' = id -- strace
 
-amountAndCommentWizard PrevInput{..} EntryState{..} = do
-  let pnum = length esPostings + 1
+-- | Interact with the user to get an amount and/or a balance assertion, maybe followed by a "; COMMENT".
+-- Returns the amount, balance assertion, and/or comment, or nothing if the input is "<".
+amountWizard :: PrevInput -> AddState -> Wizard Haskeline (Maybe (Maybe Amount, Maybe BalanceAssertion, Comment))
+amountWizard previnput@PrevInput{..} state@AddState{..} = do
+  let pnum = length asPostings + 1
       (mhistoricalp,followedhistoricalsofar) =
-          case esSimilarTransaction of
+          case asSimilarTransaction of
             Nothing                        -> (Nothing,False)
             Just Transaction{tpostings=ps} ->
               ( if length ps >= pnum then Just (ps !! (pnum-1)) else Nothing
-              , all sameamount $ zip esPostings ps
+              , all sameamount $ zip asPostings ps
               )
               where
                 sameamount (p1,p2) = mixedAmountUnstyled (pamount p1) == mixedAmountUnstyled (pamount p2)
-      def | (d:_) <- esArgs                                     = d
+      def | (d:_) <- asArgs                                     = d
           | Just hp <- mhistoricalp, followedhistoricalsofar    = showamt $ pamount hp
           | pnum > 1 && not (mixedAmountLooksZero balancingamt) = showamt balancingamtfirstcommodity
           | otherwise                                           = ""
-  retryMsg "A valid hledger amount is required. Eg: 1, $2, 3 EUR, \"4 red apples\"." $
-   parser parseAmountAndComment $
+  retryMsg "A valid hledger amount is required. Eg: 1, $2, 3 EUR, \"4 red apples\"." $ 
+   parser' parseAmountAndComment $
    withCompletion (amountCompleter def) $
    defaultTo' def $
    nonEmpty $
-   linePrewritten (green $ printf "Amount  %d%s: " pnum (showDefault def)) (fromMaybe "" $ prevAmountAndCmnt `atMay` length esPostings) ""
+   linePrewritten (green' $ printf "Amount  %d%s: " pnum (showDefault def)) (fromMaybe "" $ prevAmountAndCmnt `atMay` length asPostings) ""
     where
-      parseAmountAndComment s = if s == "<" then return Nothing else either (const Nothing) (return . Just) $
-                                runParser
-                                  (evalStateT (amountandcommentp <* eof) nodefcommodityj)
-                                  ""
-                                  (T.pack s)
-      nodefcommodityj = esJournal{jparsedefaultcommodity=Nothing}
-      amountandcommentp :: JournalParser Identity (Amount, Text)
+      -- Custom parser that combines with Wizard to use IO via outputLn
+      parser' f a = a >>= \input ->
+        case f input of
+          Left err -> do
+            outputLn (customErrorBundlePretty err)
+            amountWizard previnput state
+          Right res -> pure res
+      parseAmountAndComment s = 
+        if s == "<" then Right Nothing else 
+         Just <$> runParser 
+            (evalStateT (amountandcommentp <* eof) nodefcommodityj)
+            ""
+            (T.pack s)
+      nodefcommodityj = asJournal{jparsedefaultcommodity=Nothing}
+      amountandcommentp :: JournalParser Identity (Maybe Amount, Maybe BalanceAssertion, Comment)
       amountandcommentp = do
-        a <- amountp
+        mamt <- optional amountp
         lift skipNonNewlineSpaces
-        c <- T.pack <$> fromMaybe "" `fmap` optional (char ';' >> many anySingle)
-        -- eof
-        return (a,c)
-      balancingamt = maNegate . sumPostings $ filter isReal esPostings
+        massertion <- optional balanceassertionp
+        com <- T.pack <$> fromMaybe "" `fmap` optional (char ';' >> many anySingle)
+        case rtp (postingcommentp (let (y,_,_) = toGregorian asDefDate in Just y)) (T.cons ';' com) of
+          Left err -> fail $ customErrorBundlePretty err
+          -- Keep our original comment string from the user to add to the journal
+          Right (_, tags, date1', date2') -> return $ (mamt, massertion, (com, tags, date1', date2'))
+      balancingamt = maNegate . sumPostings $ filter isReal asPostings
       balancingamtfirstcommodity = mixed . take 1 $ amounts balancingamt
-      showamt = wbUnpack . showMixedAmountB noColour . mixedAmountSetPrecision
+      showamt = wbUnpack . showMixedAmountB defaultFmt . mixedAmountSetPrecision
                   -- what should this be ?
                   -- 1 maxprecision (show all decimal places or none) ?
                   -- 2 maxprecisionwithpoint (show all decimal places or .0 - avoids some but not all confusion with thousands separators) ?
@@ -371,27 +427,22 @@ amountAndCommentWizard PrevInput{..} EntryState{..} = do
                   NaturalPrecision
   --
   -- let -- (amt,comment) = (strip a, strip $ dropWhile (==';') b) where (a,b) = break (==';') amtcmt
-      -- a           = fromparse $ runParser (amountp <|> return missingamt) (jparsestate esJournal) "" amt
+      -- a           = fromparse $ runParser (amountp <|> return missingamt) (jparsestate asJournal) "" amt
   --     awithoutjps = fromparse $ runParser (amountp <|> return missingamt) mempty              "" amt
   --     defamtaccepted = Just (showAmount a) == mdefamt
-  --     es2 = if defamtaccepted then es1 else es1{esHistoricalPostings=Nothing}
+  --     as2 = if defamtaccepted then as1 else as1{asHistoricalPostings=Nothing}
   --     mdefaultcommodityapplied = if acommodity a == acommodity awithoutjps then Nothing else Just $ acommodity a
   -- when (isJust mdefaultcommodityapplied) $
   --      liftIO $ hPutStrLn stderr $ printf "using default commodity (%s)" (fromJust mdefaultcommodityapplied)
-
-maybeExit = parser (\s -> if s=="." then throw UnexpectedEOF else Just s)
-
--- maybeShowHelp :: Wizard Haskeline String -> Wizard Haskeline String
--- maybeShowHelp wizard = maybe (liftIO showHelp >> wizard) return $
---                        parser (\s -> if s=="?" then Nothing else Just s) wizard
 
 -- Completion helpers
 
 dateCompleter :: String -> CompletionFunc IO
 dateCompleter = completer ["today","tomorrow","yesterday"]
 
+-- Offer payees declared, payees used, or full descriptions used.
 descriptionCompleter :: Journal -> String -> CompletionFunc IO
-descriptionCompleter j = completer (map T.unpack $ journalDescriptions j)
+descriptionCompleter j = completer (map T.unpack $ nub $ journalPayeesDeclaredOrUsed j ++ journalDescriptions j)
 
 accountCompleter :: Journal -> String -> CompletionFunc IO
 accountCompleter j = completer (map T.unpack $ journalAccountNamesDeclaredOrImplied j)
@@ -418,14 +469,37 @@ completer completions def = completeWord Nothing "" completionsFor
 
 -- utilities
 
+maybeExit = parser (\s -> if s == "." then throw UnexpectedEOF else Just s)
+
+-- maybeShowHelp :: Wizard Haskeline String -> Wizard Haskeline String
+-- maybeShowHelp wizard = maybe (liftIO showHelp >> wizard) return $
+--                        parser (\s -> if s=="?" then Nothing else Just s) wizard
+
 defaultTo' = flip defaultTo
 
 withCompletion f = withSettings (setComplete f defaultSettings)
 
-green s = "\ESC[1;32m\STX"++s++"\ESC[0m\STX"
-
 showDefault "" = ""
 showDefault s = " [" ++ s ++ "]"
+
+-- | Balance and check a transaction with awareness of the whole journal it will be added to.
+-- This means add it to the journal, balance it, calculate any balance assignments in it,
+-- then maybe check all the journal's balance assertions,
+-- then return the now fully balanced and checked transaction, or an error message.
+balanceTransactionInJournal :: Transaction -> Journal -> BalancingOpts -> Either String Transaction
+balanceTransactionInJournal t j bopts = do
+  -- Add the transaction at the end of the journal, as the add command will.
+  let j' = j{jtxns = jtxns j ++ [t]}
+  -- Try to balance and check the whole journal, and specifically the new transaction.
+  Journal{jtxns=ts} <- journalBalanceTransactions bopts j'
+  -- Extract the balanced & checked transaction.
+  maybe
+    (Left "balanceTransactionInJournal: unexpected empty journal") -- should not happen
+    Right
+    (lastMay ts)
+
+postingsAreBalanced :: [Posting] -> Bool
+postingsAreBalanced ps = isRight $ balanceSingleTransaction defbalancingopts nulltransaction{tpostings = ps}
 
 -- | Append this transaction to the journal's file and transaction list.
 journalAddTransaction :: Journal -> CliOpts -> Transaction -> IO Journal
@@ -449,7 +523,9 @@ journalAddTransaction j@Journal{jtxns=ts} opts t = do
 appendToJournalFileOrStdout :: FilePath -> Text -> IO ()
 appendToJournalFileOrStdout f s
   | f == "-"  = T.putStr s'
-  | otherwise = appendFile f $ T.unpack s'
+  | otherwise = do
+      ensureJournalFileExists f
+      appendFile f $ T.unpack s'
   where s' = "\n" <> ensureOneNewlineTerminated s
 
 -- | Replace a string's 0 or more terminating newlines with exactly one.
@@ -459,7 +535,7 @@ ensureOneNewlineTerminated = (<>"\n") . T.dropWhileEnd (=='\n')
 -- | Convert a string of journal data into a register report.
 registerFromString :: T.Text -> IO TL.Text
 registerFromString s = do
-  j <- readJournal' s
+  j <- readJournal'' s
   return . postingsReportAsText opts $ postingsReport rspec j
       where
         ropts = defreportopts{empty_=True}

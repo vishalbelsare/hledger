@@ -15,7 +15,7 @@ module Hledger.Cli.Commands.Descriptions (
 ) where
 
 import Data.List.Extra (nubSort)
-import qualified Data.Text.IO as T
+import Data.Text.IO qualified as T
 
 import Hledger
 import Hledger.Cli.CliOptions
@@ -25,7 +25,7 @@ import Hledger.Cli.CliOptions
 descriptionsmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Descriptions.txt")
   []
-  [generalflagsgroup1]
+  cligeneralflagsgroups1
   hiddenflags
   ([], Just $ argsFlag "[QUERY]")
 
@@ -33,6 +33,6 @@ descriptionsmode = hledgerCommandMode
 descriptions :: CliOpts -> Journal -> IO ()
 descriptions CliOpts{reportspec_=rspec} j = do
   let ts = entriesReport rspec j
-      descriptions = nubSort $ map tdescription ts
+      descs = nubSort $ map tdescription ts
 
-  mapM_ T.putStrLn descriptions
+  mapM_ T.putStrLn descs

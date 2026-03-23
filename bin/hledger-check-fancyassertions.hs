@@ -11,7 +11,7 @@
 --
 -- You could make this a standalone script that runs from anywhere and
 -- recompiles itself when changed, by replacing "runghc" above with
--- "script --compile --resolver lts-16" (eg). However this uses the
+-- "script --compile --resolver lts-22" (eg). However this uses the
 -- hledger version from that stackage resolver, so in this case you
 -- should check out the corresponding release-tagged version of this
 -- script for compatibility (eg: git checkout 1.18.1).
@@ -98,6 +98,7 @@ module Main where
 
 import Control.Arrow (first)
 import Control.Monad (mplus, mzero, unless, void)
+import Control.Monad.Except (runExceptT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (runStateT)
 import Data.String (fromString)
@@ -110,24 +111,64 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Time.Calendar (toGregorian)
 import Data.Time.Calendar.OrdinalDate (mondayStartWeek, sundayStartWeek, toOrdinalDate)
 import Data.Text (Text, isPrefixOf, pack, unpack)
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Hledger.Data as H
-import qualified Hledger.Query as H
-import qualified Hledger.Read as H
-import qualified Hledger.Utils.Parse as H
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
+import Hledger.Data qualified as H
+import Hledger.Query qualified as H
+import Hledger.Read qualified as H
+import Hledger.Utils.Parse qualified as H
 import Lens.Micro (set)
 import Options.Applicative
 import System.Exit (exitFailure)
 import System.FilePath (FilePath)
-import qualified Text.Megaparsec as P
-import qualified Text.Megaparsec.Char as P
+import Text.Megaparsec qualified as P
+import Text.Megaparsec.Char qualified as P
+
+-- Don't know how to preserve newlines yet.
+helptxt = unlines [
+   "ASSERTIONS can be:"
+  ,""
+  ,"1. <VALUE_OR_ACCT> CMP <VALUE_OR_ACCT> -"
+  ,""
+  ,"In the simplest form, an assertion is just a comparison between"
+  ,"values. A value is either an amount or an account name (both as"
+  ,"defined by hledger). The comparison operators are <, <=, ==,"
+  ,">=, >, and != (with the obvious meanings)."
+  ,""
+  ,"Normally, the name of an account refers to the balance of that account"
+  ,"only, without including subaccounts. The syntax `* ACCT` refers"
+  ,"to the sum of the values in both that account and its subaccounts."
+  ,""
+  ,"Example:"
+  ,""
+  ,"hledger-check-fancyassertions -D 'budget:books  >= £0'"
+  ,""
+  ,""
+  ,"\"At the end of every day, the books budget is greater than or equal to"
+  ,"£0\", implying that if I overspend, I need to take the money out of"
+  ,"some other account. Note the double space after budget:books, this is"
+  ,"because account names can contain single spaces."
+  ,""
+  ,"2. <ASSERTION> OP <ASSERTION> -"
+  ,""
+  ,"Assertions can be combined with logical connectives. The connectives"
+  ,"are &&, ||, ==>, and <==> (with the obvious meanings)."
+  ,"Assertions can also be wrapped inside parentheses."
+  ,""
+  ,"Example:"
+  ,""
+  ,"hledger-check-fancyassertions '(assets:overdraft  < £2000) ==> (*assets:checking  == £0)'"
+  ,""
+  ,""
+  ,"\"If I have taken money from my overdraft, then I must have no money in"
+  ,"my checking account (including subaccounts).\""
+  ]
 
 main :: IO ()
 main = do
     opts <- execParser args
     journalFile <- maybe H.defaultJournalPath pure (file opts)
-    ejournal    <- H.readJournalFile (set H.ignore_assertions (ignoreAssertions opts) H.definputopts) journalFile
+    ejournal    <- runExceptT $ H.readJournalFile (set H.ignore_assertions (ignoreAssertions opts) H.definputopts) journalFile
     case ejournal of
       Right j -> do
         (journal, starting) <- fixupJournal opts j
@@ -184,7 +225,7 @@ checkAssertions balances0 asserts0 postingss
               -- Restrict to accounts mentioned in the predicate, and pretty-print balances
               balances' = filter (flip inAssertion p . fst) balances
               maxalen   = maximum $ map (T.length . fst) balances'
-              accounts = [ a <> padding <> T.pack (show m)
+              accounts = [ a <> padding <> T.pack (H.showMixedAmount m)
                          | (a,m) <- balances'
                          , let padding = T.replicate (2 + maxalen - T.length a) " "
                          ]
@@ -367,6 +408,7 @@ args :: ParserInfo Opts
 args = info (helper <*> parser) $ mconcat
     [ fullDesc
     , progDesc "Complex account balance assertions for hledger journals."
+    , footer helptxt
     ]
   where
     parser = Opts <$> (optional . strOption)

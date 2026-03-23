@@ -1,208 +1,240 @@
-close, equity\
-Prints a sample "closing" transaction bringing specified account balances to zero,
-and an inverse "opening" transaction restoring the same account balances.
+## close
 
-If like most people you split your journal files by time, eg by year:
-at the end of the year you can use this command to "close out" your 
-asset and liability (and perhaps equity) balances in the old file, and reinitialise them in the new file.
-This helps ensure that report balances remain correct whether you are including old files or not.
-(Because all closing/opening transactions except the very first will cancel out - see example below.)
+(equity)
 
-Some people also use this command to close out revenue and expense balances at the end of an accounting period.
-This properly records the period's profit/loss as "retained earnings" (part of equity),
-and allows the accounting equation (A-L=E) to balance, 
-which you could then check by the [bse](#balancesheetequity) report's zero total.
+`close` prints several kinds of "closing" and/or "opening" transactions, useful in various situations:
+migrating balances to a new journal file, retaining earnings into equity, consolidating balances, viewing lot costs..
+Like `print`, it prints valid journal entries.
+You can copy these into your journal file(s) when you are happy with how they look.
 
-_FLAGS
-
-You can print just the closing transaction by using the `--close` flag,
-or just the opening transaction with the `--open` flag.
-
-Their descriptions are `closing balances` and `opening balances` by default;
-you can customise these with the `--close-desc` and `--open-desc` options.
-
-Just one balancing equity posting is used by default, with the amount left implicit.
-The default account name is `equity:opening/closing balances`.
-You can customise the account name(s) with `--close-acct` and `--open-acct`.
-(If you specify only one of these, it will be used for both.)
-
-With `--x/--explicit`, the equity posting's amount will be shown explicitly,
-and if it involves multiple commodities, there will be a separate equity posting for each commodity
-(as in the print command).
-
-With `--interleaved`, each equity posting is shown next to the posting it balances 
-(good for troubleshooting).
-
-### close and prices
-
-Transaction prices are ignored (and discarded) by closing/opening transactions, by default.
-With `--show-costs`, they are preserved;
-there will be a separate equity posting for each cost in each commodity.
-This means `balance -B` reports will look the same after the transition.
-Note if you have many foreign currency or investment transactions,
-this will generate very large journal entries.
-
-### close date
-
-The default closing date is yesterday, or the journal's end date, whichever is later.
-
-Unless you are running `close` on exactly the first day of the new period, 
-you'll want to override the closing date. 
-This is done by specifying a [report end date](#report-start--end-date),
-where "last day of the report period" will be the closing date.
-The opening date is always the following day.
-So to close on (end of) 2020-12-31 and open on (start of) 2021-01-01, any of these will work:
-
-| end date argument | explanation
-|-------------------|----------------------------------------------------------------------
-| `-e 2021-01-01`   | [end dates](#report-start--end-date) are exclusive
-| `-e 2021`         | equivalent, per [smart dates](#smart-dates) 
-| `-p 2020`         | equivalent, the [period's](#period-expressions) begin date is ignored 
-| `date:2020`       | equivalent [query](#queries)
-
-### Example: close asset/liability accounts for file transition
-
-Carrying asset/liability balances from 2020.journal into a new file for 2021:
-
-```shell
-$ hledger close -f 2020.journal -p 2020 assets liabilities
-# copy/paste the closing transaction to the end of 2020.journal
-# copy/paste the opening transaction to the start of 2021.journal
+```flags
+Flags:
+     --clopen[=TAGVAL]      show closing and opening balances transactions,
+                            for AL accounts by default
+     --close[=TAGVAL]       show just a closing balances transaction
+     --open[=TAGVAL]        show just an opening balances transaction
+     --assert[=TAGVAL]      show a balance assertions transaction
+     --assign[=TAGVAL]      show a balance assignments transaction
+     --retain[=TAGVAL]      show a retain earnings transaction, for RX
+                            accounts by default
+  -x --explicit             show all amounts explicitly
+     --show-costs           show amounts with different costs separately
+     --interleaved          show source and destination postings together
+     --assertion-type=TYPE  =, ==, =* or ==*
+     --close-desc=DESC      set closing transaction's description
+     --close-acct=ACCT      set closing transaction's destination account
+     --open-desc=DESC       set opening transaction's description
+     --open-acct=ACCT       set opening transaction's source account
+     --round=TYPE           how much rounding or padding should be done when
+                            displaying amounts ?
+                            none - show original decimal digits,
+                                   as in journal (default)
+                            soft - just add or remove decimal zeros
+                                   to match precision
+                            hard - round posting amounts to precision
+                                   (can unbalance transactions)
+                            all  - also round cost amounts to precision
+                                   (can unbalance transactions)
 ```
 
-Or:
+`close` has six modes, selected by choosing one of the mode flags:
+`--clopen`, `--close` (default), `--open`, `--assert`, `--assign`, or `--retain`.
+They are all doing the same kind of operation, but with different defaults for different situations.
 
-```shell
-$ hledger close -f 2020.journal -p 2020 assets liabilities --open  >> 2021.journal  # add 2021's first transaction
-$ hledger close -f 2020.journal -p 2020 assets liabilities --close >> 2020.journal  # add 2020's last transaction
+The journal entries generated by `close` will have a `clopen:` tag, which is helpful when you want to exclude them from reports.
+If the main journal file name contains a number, the tag's value will be that base file name with the number incremented.
+Eg if the journal file is 2025.journal, the tag will be `clopen:2026`.
+Or you can set the tag value by providing an argument to the mode flag.
+Eg `--close=foo` or `--clopen=2025-main`.
+
+### close --clopen
+
+This is useful if migrating balances to a new journal file at the start of a new year.
+It prints a "closing balances" transaction that zeroes out account balances (Asset and Liability accounts, by default),
+and an opposite "opening balances" transaction that restores them again.
+Typically, you would run
 ```
-
-Now,
-
-```shell
-$ hledger bs -f 2021.journal                   # just new file - balances correct
-$ hledger bs -f 2020.journal -f 2021.journal   # old and new files - balances correct
-$ hledger bs -f 2020.journal                   # just old files - balances are zero ?
-                                               # (exclude final closing txn, see below)
+hledger close --clopen -e NEWYEAR >> $LEDGER_FILE
 ```
+and then move the opening transaction from the old file to the new file
+(and probably also update your LEDGER_FILE environment variable).
 
-### Hiding opening/closing transactions
+Why might you do this ? If your reports are fast, you may not need it.
+But at some point you will probably want to partition your data by time,
+for performance or data integrity or regulatory reasons.
+A new file or set of files per year is common.
+Then, having each file/fileset "bookended" with opening and closing balance transactions
+will allow you to freely pick and choose which files to read -
+just the current year, any past year, any sequence of years, or all of them -
+while showing correct account balances in each case.
+The earliest opening balances transaction sets correct starting balances,
+and any later closing/opening pairs will harmlessly cancel each other out.
 
-Although the closing/opening transactions cancel out, they will be visible in reports like `print` and `register`, 
-creating some visual clutter. You can exclude them all with a query, like:
+The balances will be transferred to and from `equity:opening/closing balances` by default.
+You can override this by using `--close-acct` and/or `--open-acct`.
 
-```shell
-$ hledger print not:desc:'opening|closing'             # less typing
-$ hledger print not:'equity:opening/closing balances'  # more precise
-```
+You can select a different set of accounts to close/open by providing an account query.
+Eg to add Equity accounts, provide arguments like `assets liabilities equity` or `type:ALE`.
+When migrating to a new file, you'll usually want to bring along the AL or ALE accounts,
+but not the RX accounts (Revenue, Expense).
 
-But when reporting on multiple files, this can get a bit tricky;
-you may need to keep the earliest opening balances, for a historical register report;
-or you may need to suppress a closing transaction, to see year-end balances.
-If you find yourself needing more precise [queries](#queries), here's one solution:
-add more easily-matched tags to opening/closing transactions, like this:
+Assertions will be added indicating and checking the new balances of the closed/opened accounts.
 
-```journal
-; 2019.journal
-2019-01-01 opening balances  ; earliest opening txn, no tag here
-...
-2019-12-31 closing balances  ; clopen:2020
-...
-```
-```journal
-; 2020.journal
-2020-01-01 opening balances  ; clopen:2020
-...
-2020-12-31 closing balances  ; clopen:2021
-...
-```
-```journal
-; 2021.journal
-2021-01-01 opening balances  ; clopen:2021
-...
-```
+### close --close
 
-Now with
-```journal
-; all.journal
-include 2019.journal
-include 2020.journal
-include 2021.journal
-```
-you could do eg:
-```shell
-$ hledger -f all.journal reg -H checking not:tag:clopen
-    # all years checking register, hiding non-essential opening/closing txns
+This prints just the closing balances transaction of `--clopen`.
+It is the default if you don't specify a mode.
 
-$ hledger -f all.journal bs -p 2020 not:tag:clopen=2020
-    # 2020 year end balances, suppressing 2020 closing txn
+More customisation options are described below.
+Among other things, you can use `close --close` to generate a transaction
+moving the balances from any set of accounts, to a different account.
+(If you need to move just a portion of the balance, see [hledger-move](https://hledger.org/scripts.html#hledger-move).)
 
-```
+### close --open
+
+This prints just the opening balances transaction of `--clopen`.
+(It is similar to [Ledger's equity command](https://ledger-cli.org/doc/ledger3.html#The-equity-command).)
+
+### close --assert
+
+This prints a transaction that [asserts](#balance-assertions) the account balances as they are on the end date (and adds an `assert:` tag).
+It could be useful as documention and to guard against changes.
+
+### close --assign
+
+This prints a transaction that [assigns](#balance-assignments) the account balances as they are on the end date (and adds an "assign:" tag).
+Unlike balance assertions, assignments will post changes to balances as needed to reach the specified amounts.
+
+This is another way to set starting balances when migrating to a new file,
+and it will set them correctly even in the presence of earlier files which do not have a closing balances transaction.
+However, it can hide errors, and disturb the accounting equation,
+so `--clopen` is usually [recommended](https://github.com/simonmichael/hledger/issues/2151).
+
+### close --retain
+
+This is like `--close`, but it closes Revenue and Expense account balances by default.
+They will be transferred to `equity:retained earnings`, or another account specified with `--close-acct`.
+
+Revenues and expenses correspond to changes in equity.
+They are categorised separately for reporting purposes,
+but traditionally at the end of each accounting period, businesses consolidate them into equity,
+This is called "retaining earnings", or "closing the books".
+ 
+In personal accounting, there's not much reason to do this, and most people don't.
+(One reason to do it is to help the `balancesheetequity` report show a zero total,
+demonstrating that the accounting equation (A-L=E) is satisfied.)
+
+### close customisation
+
+In all modes, the following things can be overridden:
+
+- the accounts to be closed/opened, with account query arguments
+- the closing/opening dates, with `-e OPENDATE`
+- the balancing account, with `--close-acct=ACCT` and/or `--open-acct=ACCT`
+- the transaction descriptions, with `--close-desc=DESC` and `--open-desc=DESC`
+- the transactions' `clopen` tag value, with a `TAGVAL` argument for the mode flag (see above).
+
+By default, the closing date is yesterday, or the journal's end date, whichever is later;
+and the opening date is always one day after the closing date.
+You can change these by specifying a [report end date](#report-start--end-date);
+the closing date will be the last day of the report period.
+Eg `-e 2024` means "close on 2023-12-31, open on 2024-01-01".
+
+With `--x/--explicit`, the balancing amount will be shown explicitly,
+and if it involves multiple commodities, a separate posting will be generated for each of them
+(similar to `print -x`).
+
+With `--interleaved`, each individual transfer is shown with source and destination postings next to each other
+(perhaps useful for troubleshooting).
+
+With `--show-costs`, balances' costs are also shown, with different costs kept separate.
+This may generate very large journal entries, if you have many currency conversions or investment transactions.
+`close --show-costs` is currently the best way to view investment lots with hledger.
+(To move or dispose of lots, see the more capable [`hledger-move`](/scripts.md#hledger-move) script.)
 
 ### close and balance assertions
 
-The closing and opening transactions will include balance assertions, 
-verifying that the accounts have first been reset to zero and then restored to their previous balance.
-These provide valuable error checking, alerting you when things get out of line,
-but you can ignore them temporarily with `-I` or just remove them if you prefer.
+`close` adds balance assertions verifying
+that the accounts have been reset to zero in a closing transaction
+or restored to their previous balances in an opening transaction.
+These provide useful error checking, but you can ignore them temporarily with `-I`,
+or remove them if you prefer.
 
-You probably shouldn't use status or realness filters (like -C or -R or `status:`) with `close`, 
-or the generated balance assertions will depend on these flags.
-Likewise, if you run this command with `--auto`, the balance assertions would probably always require `--auto`.
+Single-commodity, subaccount-exclusive balance assertions (`=`) are generated by default.
+This can be changed with `--assertion-type='==*'` (eg).
 
-Multi-day transactions (where some postings have a different date) break the balance assertions,
-because the money is temporarily "invisible" while in transit:
+When running `close` you should probably avoid using `-C`, `-R`, `status:` (filtering by status or realness)
+or `--auto` (generating postings), since the generated balance assertions would then require these.
 
-```journal
-2020/12/30 a purchase made in december, cleared in the next year
-    expenses:food          5
-    assets:bank:checking  -5  ; date: 2021/1/2
-```
-
-To fix the assertions, you can add a temporary account to track such in-transit money
-(splitting the multi-day transaction into two single-day transactions):
+Transactions with multiple dates (eg posting dates) spanning the file boundary
+also can disrupt the balance assertions:
 
 ```journal
-; in 2020.journal:
-2020/12/30 a purchase made in december, cleared in the next year
+2023-12-30 a purchase made in december, cleared in january
     expenses:food          5
-    liabilities:pending
-
-; in 2021.journal:
-2021/1/2 clearance of last year's pending transactions
-    liabilities:pending    5 = 0
-    assets:bank:checking
+    assets:bank:checking  -5  ; date: 2023-01-02
 ```
 
-### Example: close revenue/expense accounts to retained earnings
+To solve this you can transfer the money to and from a temporary account,
+splitting the multi-day transaction into two single-day transactions:
 
-For this, use `--close` to suppress the opening transaction, as it's not needed.
-Also you'll want to change the equity account name to your equivalent of 
-"equity:retained earnings".
+```journal
+; in 2022.journal:
+2022-12-30 a purchase made in december, cleared in january
+    expenses:food          5
+    equity:pending        -5
 
-Closing 2021's first quarter revenues/expenses:
+; in 2023.journal:
+2023-01-02 last year's transaction cleared
+    equity:pending         5 = 0
+    assets:bank:checking  -5
+```
+
+### close examples
+
+#### Retain earnings
+
+Record 2022's revenues/expenses as retained earnings on 2022-12-31,
+appending the generated transaction to the journal:
  
-```shell
-$ hledger close -f 2021.journal --close revenues expenses -p 2021Q1 \
-    --close-acct='equity:retained earnings' >> 2021.journal
+```cli
+$ hledger close --retain -f 2022.journal -p 2022 >> 2022.journal
 ```
 
-The same, using the default journal and current year:
+After this, to see 2022's revenues and expenses you must exclude the retain earnings transaction:
 
-```shell
-$ hledger close --close revenues expenses -p Q1 \
-    --close-acct='equity:retained earnings' >> $LEDGER_FILE
+```cli
+$ hledger -f 2022.journal is not:desc:'retain earnings'
 ```
 
-Now, the first quarter's balance sheet should show a zero
-(unless you are using @/@@ notation without [equity postings](/investments.html#a-more-correct-entry)):
+#### Migrate balances to a new file
 
-```shell
-$ hledger bse -p Q1
+Close assets/liabilities on 2022-12-31 and re-open them on 2023-01-01:
+
+```cli
+$ hledger close --clopen -f 2022.journal -p 2022
+# copy/paste the closing transaction to the end of 2022.journal
+# copy/paste the opening transaction to the start of 2023.journal
 ```
 
-And we must suppress the closing transaction to see the first quarter's income statement
-(using the description; `not:'retained earnings'` won't work here):
-```shell
-$ hledger is -p Q1 not:desc:'closing balances'
+After this, to see 2022's end-of-year balances you must exclude the closing balances transaction:
+
+```cli
+$ hledger -f 2022.journal bs not:desc:'closing balances'
 ```
+
+For more flexibility, it helps to tag closing and opening transactions with eg `clopen:NEWYEAR`,
+then you can ensure correct balances by excluding all opening/closing transactions except the first, like so:
+
+```cli
+$ hledger bs -Y -f 2021.j -f 2022.j -f 2023.j expr:'tag:clopen=2021 or not tag:clopen'
+$ hledger bs -Y -f 2021.j -f 2022.j           expr:'tag:clopen=2021 or not tag:clopen'
+$ hledger bs -Y -f 2022.j -f 2023.j           expr:'tag:clopen=2022 or not tag:clopen'
+$ hledger bs -Y -f 2021.j                     expr:'tag:clopen=2021 or not tag:clopen'
+$ hledger bs -Y -f 2022.j                     expr:'tag:clopen=2022 or not tag:clopen'
+$ hledger bs -Y -f 2023.j                     # unclosed file, no query needed
+```
+
+#### More detailed close examples
+
+See [examples/multi-year](https://github.com/simonmichael/hledger/tree/master/examples/multi-year/).

@@ -1,9 +1,7 @@
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE NoMonoLocalBinds    #-}
 {-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE PackageImports      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeFamilies        #-}
 {-|
 
@@ -12,7 +10,8 @@ Date parsing and utilities for hledger.
 For date and time values, we use the standard Day and UTCTime types.
 
 A 'SmartDate' is a date which may be partially-specified or relative.
-Eg 2008\/12\/31, but also 2008\/12, 12\/31, tomorrow, last week, next year.
+Eg 2008\/12\/31, but also 2008\/12, 12\/31, tomorrow, last week, next year,
+in 5 days, in -3 quarters.
 We represent these as a triple of strings like (\"2008\",\"12\",\"\"),
 (\"\",\"\",\"tomorrow\"), (\"\",\"last\",\"week\").
 
@@ -31,16 +30,20 @@ quarterly, etc.
 
 module Hledger.Data.Dates (
   -- * Misc date handling utilities
+  fromEFDay,
+  modifyEFDay,
   getCurrentDay,
   getCurrentMonth,
   getCurrentYear,
   nulldate,
   spanContainsDate,
   periodContainsDate,
-  parsedateM,
+  parsedate,
   showDate,
+  showEFDate,
   showDateSpan,
-  showDateSpanMonthAbbrev,
+  showDateSpanDebug,
+  showDateSpanAbbrev,
   elapsedSeconds,
   prevday,
   periodexprp,
@@ -60,12 +63,13 @@ module Hledger.Data.Dates (
   spanIntersect,
   spansIntersect,
   spanDefaultsFrom,
+  spanValidDefaultsFrom,
+  spanExtend,
   spanUnion,
   spansUnion,
   daysSpan,
   latestSpanContaining,
   smartdate,
-  splitSpan,
   groupByDateSpan,
   fixSmartDate,
   fixSmartDateStr,
@@ -73,17 +77,30 @@ module Hledger.Data.Dates (
   fixSmartDateStrEither',
   yearp,
   daysInSpan,
-  maybePeriod,
 
-  tests_Dates
-)
-where
+  -- Temp exports
+  startofyear,
+  startofquarter,
+  startofmonth,
+  startofweek,
+  nextday,
+  nextweek,
+  nextmonthandday,
+  nextnthdayofmonth,
+  prevNthWeekdayOfMonth,
+  nthdayofweekcontaining,
+  addGregorianMonthsToMonthday,
+  advanceToNthWeekday,
+  nextNthWeekdayOfMonth,
+  isEmptySpan
+) where
 
-import qualified Control.Monad.Fail as Fail (MonadFail, fail)
-import Control.Applicative (liftA2)
+import Prelude hiding (Applicative(..))
+import Control.Applicative (Applicative(..))
 import Control.Applicative.Permutations
 import Control.Monad (guard, unless)
-import Data.Char (digitToInt, isDigit, ord)
+import Control.Monad.Fail qualified as Fail (MonadFail, fail)
+import Data.Char (digitToInt, isDigit)
 import Data.Default (def)
 import Data.Foldable (asum)
 import Data.Function (on)
@@ -91,9 +108,9 @@ import Data.Functor (($>))
 import Data.List (elemIndex, group, sort, sortBy)
 import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Ord (comparing)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Format hiding (months)
 import Data.Time.Calendar
     (Day, addDays, addGregorianYearsClip, addGregorianMonthsClip, diffDays,
@@ -101,11 +118,10 @@ import Data.Time.Calendar
 import Data.Time.Calendar.OrdinalDate (fromMondayStartWeek, mondayStartWeek)
 import Data.Time.Clock (UTCTime, diffUTCTime)
 import Data.Time.LocalTime (getZonedTime, localDay, zonedTimeToLocalTime)
-import Safe (headMay, lastMay, maximumMay, minimumMay)
+import Safe (headErr, headMay, lastMay, maximumMay, minimumMay)
 import Text.Megaparsec
 import Text.Megaparsec.Char (char, char', digitChar, string, string')
-import Text.Megaparsec.Char.Lexer (decimal)
-import Text.Megaparsec.Custom (customErrorBundlePretty)
+import Text.Megaparsec.Char.Lexer (decimal, signed)
 import Text.Printf (printf)
 
 import Hledger.Data.Types
@@ -120,15 +136,23 @@ instance Show DateSpan where
 showDate :: Day -> Text
 showDate = T.pack . show
 
+showEFDate :: EFDay -> Text
+showEFDate = showDate . fromEFDay
+
 -- | Render a datespan as a display string, abbreviating into a
 -- compact form if possible.
+-- Warning, hides whether dates are Exact or Flex.
 showDateSpan :: DateSpan -> Text
 showDateSpan = showPeriod . dateSpanAsPeriod
 
+-- | Show a DateSpan with its begin/end dates, exact or flex.
+showDateSpanDebug :: DateSpan -> String
+showDateSpanDebug (DateSpan b e)= "DateSpan (" <> show b <> ") (" <> show e <> ")"
+
 -- | Like showDateSpan, but show month spans as just the abbreviated month name
 -- in the current locale.
-showDateSpanMonthAbbrev :: DateSpan -> Text
-showDateSpanMonthAbbrev = showPeriodMonthAbbrev . dateSpanAsPeriod
+showDateSpanAbbrev :: DateSpan -> Text
+showDateSpanAbbrev = showPeriodAbbrev . dateSpanAsPeriod
 
 -- | Get the current local date.
 getCurrentDay :: IO Day
@@ -146,116 +170,47 @@ elapsedSeconds :: Fractional a => UTCTime -> UTCTime -> a
 elapsedSeconds t1 = realToFrac . diffUTCTime t1
 
 spanStart :: DateSpan -> Maybe Day
-spanStart (DateSpan d _) = d
+spanStart (DateSpan d _) = fromEFDay <$> d
 
 spanEnd :: DateSpan -> Maybe Day
-spanEnd (DateSpan _ d) = d
+spanEnd (DateSpan _ d) = fromEFDay <$> d
+
+spanStartDate :: DateSpan -> Maybe EFDay
+spanStartDate (DateSpan d _) = d
+
+spanEndDate :: DateSpan -> Maybe EFDay
+spanEndDate (DateSpan _ d) = d
 
 spanStartYear :: DateSpan -> Maybe Year
-spanStartYear (DateSpan d _) = fmap (first3 . toGregorian) d
+spanStartYear (DateSpan d _) = fmap (first3 . toGregorian . fromEFDay) d
 
 spanEndYear :: DateSpan -> Maybe Year
-spanEndYear (DateSpan d _) = fmap (first3 . toGregorian) d
+spanEndYear (DateSpan d _) = fmap (first3 . toGregorian. fromEFDay) d
 
 -- | Get the 0-2 years mentioned explicitly in a DateSpan.
 spanYears :: DateSpan -> [Year]
-spanYears (DateSpan ma mb) = mapMaybe (fmap (first3 . toGregorian)) [ma,mb]
+spanYears (DateSpan ma mb) = mapMaybe (fmap (first3 . toGregorian. fromEFDay)) [ma,mb]
 
 -- might be useful later: http://en.wikipedia.org/wiki/Allen%27s_interval_algebra
 
 -- | Get overall span enclosing multiple sequentially ordered spans.
+-- The start and end date will be exact or flexible depending on
+-- the first span's start date and last span's end date.
 spansSpan :: [DateSpan] -> DateSpan
-spansSpan spans = DateSpan (spanStart =<< headMay spans) (spanEnd =<< lastMay spans)
+spansSpan spans = DateSpan (spanStartDate =<< headMay spans) (spanEndDate =<< lastMay spans)
 
--- | Split a DateSpan into consecutive whole spans of the specified interval
--- which fully encompass the original span (and a little more when necessary).
--- If no interval is specified, the original span is returned.
--- If the original span is the null date span, ie unbounded, the null date span is returned.
--- If the original span is empty, eg if the end date is <= the start date, no spans are returned.
---
---
--- ==== Examples:
--- >>> let t i y1 m1 d1 y2 m2 d2 = splitSpan i $ DateSpan (Just $ fromGregorian y1 m1 d1) (Just $ fromGregorian y2 m2 d2)
--- >>> t NoInterval 2008 01 01 2009 01 01
--- [DateSpan 2008]
--- >>> t (Quarters 1) 2008 01 01 2009 01 01
--- [DateSpan 2008Q1,DateSpan 2008Q2,DateSpan 2008Q3,DateSpan 2008Q4]
--- >>> splitSpan (Quarters 1) nulldatespan
--- [DateSpan ..]
--- >>> t (Days 1) 2008 01 01 2008 01 01  -- an empty datespan
--- []
--- >>> t (Quarters 1) 2008 01 01 2008 01 01
--- []
--- >>> t (Months 1) 2008 01 01 2008 04 01
--- [DateSpan 2008-01,DateSpan 2008-02,DateSpan 2008-03]
--- >>> t (Months 2) 2008 01 01 2008 04 01
--- [DateSpan 2008-01-01..2008-02-29,DateSpan 2008-03-01..2008-04-30]
--- >>> t (Weeks 1) 2008 01 01 2008 01 15
--- [DateSpan 2007-12-31W01,DateSpan 2008-01-07W02,DateSpan 2008-01-14W03]
--- >>> t (Weeks 2) 2008 01 01 2008 01 15
--- [DateSpan 2007-12-31..2008-01-13,DateSpan 2008-01-14..2008-01-27]
--- >>> t (DayOfMonth 2) 2008 01 01 2008 04 01
--- [DateSpan 2007-12-02..2008-01-01,DateSpan 2008-01-02..2008-02-01,DateSpan 2008-02-02..2008-03-01,DateSpan 2008-03-02..2008-04-01]
--- >>> t (WeekdayOfMonth 2 4) 2011 01 01 2011 02 15
--- [DateSpan 2010-12-09..2011-01-12,DateSpan 2011-01-13..2011-02-09,DateSpan 2011-02-10..2011-03-09]
--- >>> t (DaysOfWeek [2]) 2011 01 01 2011 01 15
--- [DateSpan 2010-12-28..2011-01-03,DateSpan 2011-01-04..2011-01-10,DateSpan 2011-01-11..2011-01-17]
--- >>> t (DayOfYear 11 29) 2011 10 01 2011 10 15
--- [DateSpan 2010-11-29..2011-11-28]
--- >>> t (DayOfYear 11 29) 2011 12 01 2012 12 15
--- [DateSpan 2011-11-29..2012-11-28,DateSpan 2012-11-29..2013-11-28]
---
-splitSpan :: Interval -> DateSpan -> [DateSpan]
-splitSpan _ (DateSpan Nothing Nothing) = [DateSpan Nothing Nothing]
-splitSpan _ s | isEmptySpan s = []
-splitSpan NoInterval     s = [s]
-splitSpan (Days n)       s = splitspan startofday     (applyN n nextday)     s
-splitSpan (Weeks n)      s = splitspan startofweek    (applyN n nextweek)    s
-splitSpan (Months n)     s = splitspan startofmonth   (applyN n nextmonth)   s
-splitSpan (Quarters n)   s = splitspan startofquarter (applyN n nextquarter) s
-splitSpan (Years n)      s = splitspan startofyear    (applyN n nextyear)    s
-splitSpan (DayOfMonth n) s = splitspan (nthdayofmonthcontaining n) (nthdayofmonth n . nextmonth) s
-splitSpan (WeekdayOfMonth n wd) s = splitspan (nthweekdayofmonthcontaining n wd) (advancetonthweekday n wd . nextmonth) s
-splitSpan (DaysOfWeek []) s = [s]  -- shouldn't happen in parser but for completeness
-splitSpan (DaysOfWeek days@(n:_)) ds
-  | DateSpan Nothing  (Just e)  <- ds = split (DateSpan (Just $ start e) (Just $ nextday $ start e))
-  | DateSpan (Just s) Nothing  <- ds = split (DateSpan (Just $ start s) (Just $ nextday $ start s))
-  | DateSpan (Just s) (Just e) <- ds =
-      if s == e then [ds] else split (DateSpan (Just $ start s) (Just e))
-  where
-    start = nthdayofweekcontaining n
-
-    wheel = (\x -> zipWith (-) (tail x) x) . concat . zipWith fmap (fmap (+) [0,7..]) . repeat $ days
-
-    split = splitspan' (repeat startofday) (fmap (`applyN` nextday) wheel)
-
-splitSpan (DayOfYear m n) s = splitspan (nthdayofyearcontaining m n) (applyN (n-1) nextday . applyN (m-1) nextmonth . nextyear) s
--- splitSpan (WeekOfYear n)    s = splitspan startofweek    (applyN n nextweek)    s
--- splitSpan (MonthOfYear n)   s = splitspan startofmonth   (applyN n nextmonth)   s
--- splitSpan (QuarterOfYear n) s = splitspan startofquarter (applyN n nextquarter) s
-
--- Split the given span using the provided helper functions:
--- start is applied to the span's start date to get the first sub-span's start date
--- next is applied to a sub-span's start date to get the next sub-span's start date
-splitspan :: (Day -> Day) -> (Day -> Day) -> DateSpan -> [DateSpan]
-splitspan _ _ (DateSpan Nothing Nothing) = []
-splitspan start next (DateSpan Nothing (Just e)) = splitspan start next (DateSpan (Just $ start e) (Just $ next $ start e))
-splitspan start next (DateSpan (Just s) Nothing) = splitspan start next (DateSpan (Just $ start s) (Just $ next $ start s))
-splitspan start next span@(DateSpan (Just s) (Just e))
-    | s == e = [span]
-    | otherwise = splitspan' (repeat start) (repeat next) span
-
-splitspan' :: [Day -> Day] -> [Day -> Day] -> DateSpan -> [DateSpan]
-splitspan' (start:ss) (next:ns) (DateSpan (Just s) (Just e))
-    | s >= e = []
-    | otherwise = DateSpan (Just subs) (Just sube) : splitspan' ss ns (DateSpan (Just sube) (Just e))
-    where subs = start s
-          sube = next subs
-splitspan' _ _ _ = error' "won't happen, avoids warnings"  -- PARTIAL:
+-- Like addGregorianMonthsClip, add one month to the given date, clipping when needed
+-- to fit it within the next month's length. But also, keep a target day of month in mind,
+-- and revert to that or as close to it as possible in subsequent longer months.
+-- Eg, using it to step through 31sts gives 1/31, 2/28, 3/31, 4/30, 5/31..
+addGregorianMonthsToMonthday :: MonthDay -> Integer -> Day -> Day
+addGregorianMonthsToMonthday dom n d =
+  let (y,m,_) = toGregorian $ addGregorianMonthsClip n d
+  in fromGregorian y m dom
 
 -- | Count the days in a DateSpan, or if it is open-ended return Nothing.
 daysInSpan :: DateSpan -> Maybe Integer
-daysInSpan (DateSpan (Just d1) (Just d2)) = Just $ diffDays d2 d1
+daysInSpan (DateSpan (Just d1) (Just d2)) = Just $ diffDays (fromEFDay d2) (fromEFDay d1)
 daysInSpan _ = Nothing
 
 -- | Is this an empty span, ie closed with the end date on or before the start date ?
@@ -266,9 +221,9 @@ isEmptySpan _                            = False
 -- | Does the span include the given date ?
 spanContainsDate :: DateSpan -> Day -> Bool
 spanContainsDate (DateSpan Nothing Nothing)   _ = True
-spanContainsDate (DateSpan Nothing (Just e))  d = d < e
-spanContainsDate (DateSpan (Just b) Nothing)  d = d >= b
-spanContainsDate (DateSpan (Just b) (Just e)) d = d >= b && d < e
+spanContainsDate (DateSpan Nothing (Just e))  d = d < fromEFDay e
+spanContainsDate (DateSpan (Just b) Nothing)  d = d >= fromEFDay b
+spanContainsDate (DateSpan (Just b) (Just e)) d = d >= fromEFDay b && d < fromEFDay e
 
 -- | Does the period include the given date ?
 -- (Here to avoid import cycle).
@@ -286,56 +241,133 @@ groupByDateSpan showempty date colspans =
   where
     groupByCols []     _  = []
     groupByCols (c:cs) [] = if showempty then (c, []) : groupByCols cs [] else []
-    groupByCols (c:cs) ps = (c, map snd matches) : groupByCols cs later
-      where (matches, later) = span ((spanEnd c >) . Just . fst) ps
+    groupByCols (c:cs) ps = (c, map snd colps) : groupByCols cs laterps
+      where (colps, laterps) = span ((spanEnd c >) . Just . fst) ps
 
-    beforeStart = maybe (const True) (>) $ spanStart =<< headMay colspans
+    beforeStart = maybe (const False) (>) $ spanStart =<< headMay colspans
 
 -- | Calculate the intersection of a number of datespans.
 spansIntersect [] = nulldatespan
 spansIntersect [d] = d
 spansIntersect (d:ds) = d `spanIntersect` (spansIntersect ds)
 
--- | Calculate the intersection of two datespans.
---
--- For non-intersecting spans, gives an empty span beginning on the second's start date:
--- >>> DateSpan (Just $ fromGregorian 2018 01 01) (Just $ fromGregorian 2018 01 03) `spanIntersect` DateSpan (Just $ fromGregorian 2018 01 03) (Just $ fromGregorian 2018 01 05)
--- DateSpan 2018-01-03..2018-01-02
-spanIntersect (DateSpan b1 e1) (DateSpan b2 e2) = DateSpan b e
-    where
-      b = latest b1 b2
-      e = earliest e1 e2
-
--- | Fill any unspecified dates in the first span with the dates from
--- the second one. Sort of a one-way spanIntersect.
-spanDefaultsFrom (DateSpan a1 b1) (DateSpan a2 b2) = DateSpan a b
-    where a = if isJust a1 then a1 else a2
-          b = if isJust b1 then b1 else b2
-
 -- | Calculate the union of a number of datespans.
 spansUnion [] = nulldatespan
 spansUnion [d] = d
 spansUnion (d:ds) = d `spanUnion` (spansUnion ds)
 
+-- | Calculate the intersection of two datespans.
+--
+-- For non-intersecting spans, gives an empty span beginning on the second's start date:
+-- >>> DateSpan (Just $ Flex $ fromGregorian 2018 01 01) (Just $ Flex $ fromGregorian 2018 01 03) `spanIntersect` DateSpan (Just $ Flex $ fromGregorian 2018 01 03) (Just $ Flex $ fromGregorian 2018 01 05)
+-- DateSpan 2018-01-03..2018-01-02
+spanIntersect (DateSpan b1 e1) (DateSpan b2 e2) = DateSpan (laterDefinite b1 b2) (earlierDefinite e1 e2)
+
+-- | Fill any unspecified dates in the first span with the dates from
+-- the second one (if specified there). Sort of a one-way spanIntersect.
+-- This one can create an invalid span that'll always be empty.
+--
+-- >>> :{
+--  DateSpan (Just $ Exact $ fromGregorian 2024 1 1) Nothing
+--  `spanDefaultsFrom`
+--  DateSpan (Just $ Exact $ fromGregorian 2024 1 1) (Just $ Exact $ fromGregorian 2024 1 2)
+-- :}
+-- DateSpan 2024-01-01
+--
+-- >>> :{
+--  DateSpan (Just $ Exact $ fromGregorian 2025 1 1) Nothing
+--  `spanDefaultsFrom`
+--  DateSpan (Just $ Exact $ fromGregorian 2024 1 1) (Just $ Exact $ fromGregorian 2024 1 2)
+-- :}
+-- DateSpan 2025-01-01..2024-01-01
+--
+spanDefaultsFrom :: DateSpan -> DateSpan -> DateSpan
+spanDefaultsFrom (DateSpan a1 b1) (DateSpan a2 b2) = DateSpan a b
+    where a = if isJust a1 then a1 else a2
+          b = if isJust b1 then b1 else b2
+
+-- | A smarter version of spanDefaultsFrom that avoids creating invalid
+-- spans ending before they begin. Kept separate for now to reduce risk.
+--
+-- >>> :{
+--  DateSpan (Just $ Exact $ fromGregorian 2025 1 1) Nothing
+--  `spanValidDefaultsFrom`
+--  DateSpan (Just $ Exact $ fromGregorian 2024 1 1) (Just $ Exact $ fromGregorian 2024 1 2)
+-- :}
+-- DateSpan 2025-01-01..
+--
+spanValidDefaultsFrom :: DateSpan -> DateSpan -> DateSpan
+spanValidDefaultsFrom s1 s2 =
+  case s1 `spanDefaultsFrom` s2 of
+    DateSpan b e | b >= e -> s1
+    s -> s
+
 -- | Calculate the union of two datespans.
-spanUnion (DateSpan b1 e1) (DateSpan b2 e2) = DateSpan b e
-    where
-      b = earliest b1 b2
-      e = latest e1 e2
+-- If either span is open-ended, the union will be too.
+--
+-- >>> ys2024 = fromGregorian 2024 01 01
+-- >>> ys2025 = fromGregorian 2025 01 01
+-- >>> to2024 = DateSpan Nothing               (Just $ Exact ys2024)
+-- >>> in2024 = DateSpan (Just $ Exact ys2024) (Just $ Exact ys2025)
+-- >>> spanUnion to2024 in2024
+-- DateSpan ..2024-12-31
+-- >>> spanUnion in2024 to2024
+-- DateSpan ..2024-12-31
+spanUnion (DateSpan b1 e1) (DateSpan b2 e2) = DateSpan (earlier b1 b2) (later e1 e2)
 
-latest d Nothing = d
-latest Nothing d = d
-latest (Just d1) (Just d2) = Just $ max d1 d2
+-- | Extend the definite start/end dates of the first span, if needed,
+-- to include the definite start/end dates of the second span.
+-- And/or, replace open start/end dates in the first span with
+-- definite start/end dates from the second.
+-- Unlike spanUnion, open start/end dates in the second are ignored.
+--
+-- >>> ys2024 = fromGregorian 2024 01 01
+-- >>> ys2025 = fromGregorian 2025 01 01
+-- >>> to2024 = DateSpan Nothing               (Just $ Exact ys2024)
+-- >>> all2024 = DateSpan (Just $ Exact ys2024) (Just $ Exact ys2025)
+-- >>> partof2024 = DateSpan (Just $ Exact $ fromGregorian 2024 03 01) (Just $ Exact $ fromGregorian 2024 09 01)
+-- >>> spanExtend to2024 all2024
+-- DateSpan 2024
+-- >>> spanExtend all2024 to2024
+-- DateSpan 2024
+-- >>> spanExtend partof2024 all2024
+-- DateSpan 2024
+-- >>> spanExtend all2024 partof2024
+-- DateSpan 2024
+--
+spanExtend (DateSpan b1 e1) (DateSpan b2 e2) = DateSpan (earlierDefinite b1 b2) (laterDefinite e1 e2)
 
-earliest d Nothing = d
-earliest Nothing d = d
-earliest (Just d1) (Just d2) = Just $ min d1 d2
+-- | Pick the earlier of two DateSpan starts, treating Nothing as infinitely early.
+-- An Exact and Flex with the same date are considered equal; the first argument wins.
+earlier :: Maybe EFDay -> Maybe EFDay -> Maybe EFDay
+earlier = min
+
+-- | Pick the later of two DateSpan starts, treating Nothing as infinitely late.
+-- An Exact and Flex with the same date are considered equal; the second argument wins.
+later :: Maybe EFDay -> Maybe EFDay -> Maybe EFDay
+later _ Nothing = Nothing
+later Nothing _ = Nothing
+later d1 d2     = max d1 d2
+
+-- | Pick the earlier of two DateSpan ends that is a definite date (if any).
+-- An Exact and Flex with the same date are considered equal; the first argument wins.
+earlierDefinite :: Maybe EFDay -> Maybe EFDay -> Maybe EFDay
+earlierDefinite d1 Nothing = d1
+earlierDefinite Nothing d2 = d2
+earlierDefinite d1 d2      = min d1 d2
+
+-- | Pick the later of two DateSpan ends that is a definite date (if any).
+-- An Exact and Flex with the same date are considered equal; the second argument wins.
+laterDefinite :: Maybe EFDay -> Maybe EFDay -> Maybe EFDay
+laterDefinite d1 Nothing = d1
+laterDefinite Nothing d2 = d2
+laterDefinite d1 d2      = max d1 d2
 
 -- | Calculate the minimal DateSpan containing all of the given Days (in the
 -- usual exclusive-end-date sense: beginning on the earliest, and ending on
 -- the day after the latest).
 daysSpan :: [Day] -> DateSpan
-daysSpan ds = DateSpan (minimumMay ds) (addDays 1 <$> maximumMay ds)
+daysSpan ds = DateSpan (Exact <$> minimumMay ds) (Exact . addDays 1 <$> maximumMay ds)
 
 -- | Select the DateSpan containing a given Day, if any, from a given list of
 -- DateSpans.
@@ -352,19 +384,19 @@ latestSpanContaining :: [DateSpan] -> Day -> Maybe DateSpan
 latestSpanContaining datespans = go
   where
     go day = do
-        span <- Set.lookupLT supSpan spanSet
-        guard $ spanContainsDate span day
-        return span
+        spn <- Set.lookupLT supSpan spanSet
+        guard $ spanContainsDate spn day
+        return spn
       where
         -- The smallest DateSpan larger than any DateSpan containing day.
-        supSpan = DateSpan (Just $ addDays 1 day) Nothing
+        supSpan = DateSpan (Just $ Exact $ addDays 1 day) Nothing
 
     spanSet = Set.fromList $ filter (not . isEmptySpan) datespans
 
 -- | Parse a period expression to an Interval and overall DateSpan using
 -- the provided reference date, or return a parse error.
 parsePeriodExpr
-  :: Day -> Text -> Either (ParseErrorBundle Text CustomErr) (Interval, DateSpan)
+  :: Day -> Text -> Either HledgerParseErrors (Interval, DateSpan)
 parsePeriodExpr refdate s = parsewith (periodexprp refdate <* eof) (T.toLower s)
 
 -- | Like parsePeriodExpr, but call error' on failure.
@@ -372,9 +404,6 @@ parsePeriodExpr' :: Day -> Text -> (Interval, DateSpan)
 parsePeriodExpr' refdate s =
   either (error' . ("failed to parse:" ++) . customErrorBundlePretty) id $  -- PARTIAL:
   parsePeriodExpr refdate s
-
-maybePeriod :: Day -> Text -> Maybe (Interval,DateSpan)
-maybePeriod refdate = either (const Nothing) Just . parsePeriodExpr refdate
 
 -- | Show a DateSpan as a human-readable pseudo-period-expression string.
 -- dateSpanAsText :: DateSpan -> String
@@ -394,28 +423,25 @@ spanFromSmartDate :: Day -> SmartDate -> DateSpan
 spanFromSmartDate refdate sdate = DateSpan (Just b) (Just e)
     where
       (ry,rm,_) = toGregorian refdate
-      (b,e) = span sdate
-      span :: SmartDate -> (Day,Day)
-      span (SmartRelative This Day)                 = (refdate, nextday refdate)
-      span (SmartRelative Last Day)                 = (prevday refdate, refdate)
-      span (SmartRelative Next Day)                 = (nextday refdate, addDays 2 refdate)
-      span (SmartRelative This Week)                = (thisweek refdate, nextweek refdate)
-      span (SmartRelative Last Week)                = (prevweek refdate, thisweek refdate)
-      span (SmartRelative Next Week)                = (nextweek refdate, startofweek $ addDays 14 refdate)
-      span (SmartRelative This Month)               = (thismonth refdate, nextmonth refdate)
-      span (SmartRelative Last Month)               = (prevmonth refdate, thismonth refdate)
-      span (SmartRelative Next Month)               = (nextmonth refdate, startofmonth $ addGregorianMonthsClip 2 refdate)
-      span (SmartRelative This Quarter)             = (thisquarter refdate, nextquarter refdate)
-      span (SmartRelative Last Quarter)             = (prevquarter refdate, thisquarter refdate)
-      span (SmartRelative Next Quarter)             = (nextquarter refdate, startofquarter $ addGregorianMonthsClip 6 refdate)
-      span (SmartRelative This Year)                = (thisyear refdate, nextyear refdate)
-      span (SmartRelative Last Year)                = (prevyear refdate, thisyear refdate)
-      span (SmartRelative Next Year)                = (nextyear refdate, startofyear $ addGregorianYearsClip 2 refdate)
-      span (SmartAssumeStart y Nothing)             = (startofyear day, nextyear day) where day = fromGregorian y 1 1
-      span (SmartAssumeStart y (Just (m, Nothing))) = (startofmonth day, nextmonth day) where day = fromGregorian y m 1
-      span (SmartAssumeStart y (Just (m, Just d)))  = (day, nextday day) where day = fromGregorian y m d
-      span (SmartFromReference m d)                 = (day, nextday day) where day = fromGregorian ry (fromMaybe rm m) d
-      span (SmartMonth m)                           = (startofmonth day, nextmonth day) where day = fromGregorian ry m 1
+      (b,e) = span' sdate
+        where
+          span' :: SmartDate -> (EFDay, EFDay)
+          span' (SmartCompleteDate day)       = (Exact day, Exact $ nextday day)
+          span' (SmartAssumeStart y Nothing)  = (Flex $ startofyear day, Flex $ nextyear day) where day = fromGregorian y 1 1
+          span' (SmartAssumeStart y (Just m)) = (Flex $ startofmonth day, Flex $ nextmonth day) where day = fromGregorian y m 1
+          span' (SmartFromReference m d)      = (Exact day, Exact $ nextday day) where day = fromGregorian ry (fromMaybe rm m) d
+          span' (SmartMonth m)                = (Flex $ startofmonth day, Flex $ nextmonth day) where day = fromGregorian ry m 1
+          span' (SmartRelative n Day)         = (Exact $ addDays n refdate, Exact $ addDays (n+1) refdate)
+          span' (SmartRelative n Week)        = (Flex $ addDays (7*n) d, Flex $ addDays (7*n+7) d) where d = thisweek refdate
+          span' (SmartRelative n Month)       = (Flex $ addGregorianMonthsClip n d, Flex $ addGregorianMonthsClip (n+1) d) where d = thismonth refdate
+          span' (SmartRelative n Quarter)     = (Flex $ addGregorianMonthsClip (3*n) d, Flex $ addGregorianMonthsClip (3*n+3) d) where d = thisquarter refdate
+          span' (SmartRelative n Year)        = (Flex $ addGregorianYearsClip n d, Flex $ addGregorianYearsClip (n+1) d) where d = thisyear refdate
+          span' (SmartRelativeMonth   LT m)   = (Flex d, Flex $ nextmonth d) where d = prevnamedmonth m refdate
+          span' (SmartRelativeMonth   EQ m)   = (Flex d, Flex $ nextmonth d) where d = thisnamedmonth m refdate
+          span' (SmartRelativeMonth   GT m)   = (Flex d, Flex $ nextmonth d) where d = nextnamedmonth m refdate
+          span' (SmartRelativeWeekDay LT wd)  = (Exact d, Exact $ nextday d) where d = prevnamedweekday wd refdate
+          span' (SmartRelativeWeekDay EQ wd)  = (Exact d, Exact $ nextday d) where d = thisnamedweekday wd refdate
+          span' (SmartRelativeWeekDay GT wd)  = (Exact d, Exact $ nextday d) where d = nextnamedweekday wd refdate
 
 -- showDay :: Day -> String
 -- showDay day = printf "%04d/%02d/%02d" y m d where (y,m,d) = toGregorian day
@@ -425,19 +451,20 @@ spanFromSmartDate refdate sdate = DateSpan (Just b) (Just e)
 fixSmartDateStr :: Day -> Text -> Text
 fixSmartDateStr d s =
   either (error' . printf "could not parse date %s %s" (show s) . show) id $  -- PARTIAL:
-  (fixSmartDateStrEither d s :: Either (ParseErrorBundle Text CustomErr) Text)
+  (fixSmartDateStrEither d s :: Either HledgerParseErrors Text)
 
 -- | A safe version of fixSmartDateStr.
-fixSmartDateStrEither :: Day -> Text -> Either (ParseErrorBundle Text CustomErr) Text
-fixSmartDateStrEither d = fmap showDate . fixSmartDateStrEither' d
+fixSmartDateStrEither :: Day -> Text -> Either HledgerParseErrors Text
+fixSmartDateStrEither d = fmap showEFDate . fixSmartDateStrEither' d
 
-fixSmartDateStrEither'
-  :: Day -> Text -> Either (ParseErrorBundle Text CustomErr) Day
+fixSmartDateStrEither' :: Day -> Text -> Either HledgerParseErrors EFDay
 fixSmartDateStrEither' d s = case parsewith smartdateonly (T.toLower s) of
                                Right sd -> Right $ fixSmartDate d sd
                                Left e -> Left e
 
--- | Convert a SmartDate to an absolute date using the provided reference date.
+-- | Convert a SmartDate to a specific date using the provided reference date.
+-- This date will be exact or flexible depending on whether the day was
+-- specified exactly. (Missing least-significant parts produces a flex date.)
 --
 -- ==== Examples:
 -- >>> :set -XOverloadedStrings
@@ -503,41 +530,60 @@ fixSmartDateStrEither' d s = case parsewith smartdateonly (T.toLower s) of
 -- >>> t "next year"
 -- "2009-01-01"
 --
--- t "last wed"
+-- refdate is Wednesday, 2008-11-26
+-- >>> t "last wednesday"
 -- "2008-11-19"
--- t "next friday"
--- "2008-11-28"
--- t "next january"
+-- >>> t "this wednesday"
+-- "2008-12-03"
+-- >>> t "next wednesday"
+-- "2008-12-03"
+-- >>> t "last january"
+-- "2008-01-01"
+-- >>> t "this january"
 -- "2009-01-01"
+-- >>> t "next january"
+-- "2009-01-01"
+-- >>> t "last november"
+-- "2007-11-01"
+-- >>> t "this november"
+-- "2009-11-01"
+-- >>> t "next november"
+-- "2009-11-01"
 --
-fixSmartDate :: Day -> SmartDate -> Day
+-- >>> t "in 5 days"
+-- "2008-12-01"
+-- >>> t "in 7 months"
+-- "2009-06-01"
+-- >>> t "in -2 weeks"
+-- "2008-11-10"
+-- >>> t "1 quarter ago"
+-- "2008-07-01"
+-- >>> t "1 week ahead"
+-- "2008-12-01"
+fixSmartDate :: Day -> SmartDate -> EFDay
 fixSmartDate refdate = fix
   where
-    fix :: SmartDate -> Day
-    fix (SmartRelative This Day)     = refdate
-    fix (SmartRelative Last Day)     = prevday refdate
-    fix (SmartRelative Next Day)     = nextday refdate
-    fix (SmartRelative This Week)    = thisweek refdate
-    fix (SmartRelative Last Week)    = prevweek refdate
-    fix (SmartRelative Next Week)    = nextweek refdate
-    fix (SmartRelative This Month)   = thismonth refdate
-    fix (SmartRelative Last Month)   = prevmonth refdate
-    fix (SmartRelative Next Month)   = nextmonth refdate
-    fix (SmartRelative This Quarter) = thisquarter refdate
-    fix (SmartRelative Last Quarter) = prevquarter refdate
-    fix (SmartRelative Next Quarter) = nextquarter refdate
-    fix (SmartRelative This Year)    = thisyear refdate
-    fix (SmartRelative Last Year)    = prevyear refdate
-    fix (SmartRelative Next Year)    = nextyear refdate
-    fix (SmartAssumeStart y md)      = fromGregorian y (maybe 1 fst md) (fromMaybe 1 $ snd =<< md)
-    fix (SmartFromReference m d)     = fromGregorian ry (fromMaybe rm m) d
-    fix (SmartMonth m)               = fromGregorian ry m 1
+    fix :: SmartDate -> EFDay
+    fix (SmartCompleteDate d)     = Exact d
+    fix (SmartAssumeStart y m)    = Flex  $ fromGregorian y (fromMaybe 1 m) 1
+    fix (SmartFromReference m d)  = Exact $ fromGregorian ry (fromMaybe rm m) d
+    fix (SmartMonth m)            = Flex  $ fromGregorian ry m 1
+    fix (SmartRelative n Day)     = Exact $ addDays n refdate
+    fix (SmartRelative n Week)    = Flex  $ addDays (7*n) $ thisweek refdate
+    fix (SmartRelative n Month)   = Flex  $ addGregorianMonthsClip n $ thismonth refdate
+    fix (SmartRelative n Quarter) = Flex  $ addGregorianMonthsClip (3*n) $ thisquarter refdate
+    fix (SmartRelative n Year)    = Flex  $ addGregorianYearsClip n $ thisyear refdate
+    fix (SmartRelativeMonth LT m)    = Flex $ prevnamedmonth m refdate
+    fix (SmartRelativeMonth EQ m)    = Flex $ thisnamedmonth m refdate
+    fix (SmartRelativeMonth GT m)    = Flex $ nextnamedmonth m refdate
+    fix (SmartRelativeWeekDay LT wd) = Exact $ prevnamedweekday wd refdate
+    fix (SmartRelativeWeekDay EQ wd) = Exact $ thisnamedweekday wd refdate
+    fix (SmartRelativeWeekDay GT wd) = Exact $ nextnamedweekday wd refdate
     (ry, rm, _) = toGregorian refdate
 
 prevday :: Day -> Day
 prevday = addDays (-1)
 nextday = addDays 1
-startofday = id
 
 thisweek = startofweek
 prevweek = startofweek . addDays (-7)
@@ -553,78 +599,91 @@ nextmonth = startofmonth . addGregorianMonthsClip 1
 startofmonth day = fromGregorian y m 1 where (y,m,_) = toGregorian day
 nthdayofmonth d day = fromGregorian y m d where (y,m,_) = toGregorian day
 
+prevnamedmonth :: Month -> Day -> Day
+prevnamedmonth targetmonth refdate = fromGregorian y' targetmonth 1
+  where
+    (y, m, _) = toGregorian refdate
+    y' = if targetmonth < m then y else y - 1
+
+nextnamedmonth :: Month -> Day -> Day
+nextnamedmonth targetmonth refdate = fromGregorian y' targetmonth 1
+  where
+    (y, m, _) = toGregorian refdate
+    y' = if targetmonth > m then y else y + 1
+
+thisnamedmonth :: Month -> Day -> Day
+thisnamedmonth = nextnamedmonth  -- "this" and "next" both mean next occurrence after current month
+
+prevnamedweekday :: WeekDay -> Day -> Day
+prevnamedweekday targetwd refdate = addDays (negate $ fromIntegral daysback) refdate
+  where
+    (_, curwd) = mondayStartWeek refdate
+    daysback = 1 + (curwd - targetwd - 1) `mod` 7
+
+nextnamedweekday :: WeekDay -> Day -> Day
+nextnamedweekday targetwd refdate = addDays (fromIntegral daysforward) refdate
+  where
+    (_, curwd) = mondayStartWeek refdate
+    daysforward = 1 + (targetwd - curwd - 1) `mod` 7
+
+thisnamedweekday :: WeekDay -> Day -> Day
+thisnamedweekday = nextnamedweekday  -- "this" and "next" both mean next occurrence after today
+
 thisquarter = startofquarter
-prevquarter = startofquarter . addGregorianMonthsClip (-3)
-nextquarter = startofquarter . addGregorianMonthsClip 3
 startofquarter day = fromGregorian y (firstmonthofquarter m) 1
     where
       (y,m,_) = toGregorian day
-      firstmonthofquarter m = ((m-1) `div` 3) * 3 + 1
+      firstmonthofquarter m2 = ((m2-1) `div` 3) * 3 + 1
 
 thisyear = startofyear
-prevyear = startofyear . addGregorianYearsClip (-1)
+-- prevyear = startofyear . addGregorianYearsClip (-1)
 nextyear = startofyear . addGregorianYearsClip 1
 startofyear day = fromGregorian y 1 1 where (y,_,_) = toGregorian day
 
--- | For given date d find year-long interval that starts on given
--- MM/DD of year and covers it.
--- The given MM and DD should be basically valid (1-12 & 1-31),
--- or an error is raised.
+-- | Find the next occurrence of the specified month and day of month, on or after the given date.
+-- The month should be 1-12 and the day of month should be 1-31, or an error will be raised.
 --
--- Examples: lets take 2017-11-22. Year-long intervals covering it that
--- starts before Nov 22 will start in 2017. However
--- intervals that start after Nov 23rd should start in 2016:
 -- >>> let wed22nd = fromGregorian 2017 11 22
--- >>> nthdayofyearcontaining 11 21 wed22nd
--- 2017-11-21
--- >>> nthdayofyearcontaining 11 22 wed22nd
+-- >>> nextmonthandday 11 21 wed22nd
+-- 2018-11-21
+-- >>> nextmonthandday 11 22 wed22nd
 -- 2017-11-22
--- >>> nthdayofyearcontaining 11 23 wed22nd
--- 2016-11-23
--- >>> nthdayofyearcontaining 12 02 wed22nd
--- 2016-12-02
--- >>> nthdayofyearcontaining 12 31 wed22nd
--- 2016-12-31
--- >>> nthdayofyearcontaining 1 1 wed22nd
--- 2017-01-01
-nthdayofyearcontaining :: Month -> MonthDay -> Day -> Day
-nthdayofyearcontaining m md date
+-- >>> nextmonthandday 11 23 wed22nd
+-- 2017-11-23
+nextmonthandday :: Month -> MonthDay -> Day -> Day
+nextmonthandday m n date
   -- PARTIAL:
-  | not (validMonth m)  = error' $ "nthdayofyearcontaining: invalid month "++show m
-  | not (validDay   md) = error' $ "nthdayofyearcontaining: invalid day "  ++show md
-  | mmddOfSameYear <= date = mmddOfSameYear
-  | otherwise = mmddOfPrevYear
-  where mmddOfSameYear = addDays (toInteger md-1) $ applyN (m-1) nextmonth s
-        mmddOfPrevYear = addDays (toInteger md-1) $ applyN (m-1) nextmonth $ prevyear s
-        s = startofyear date
+  | not (validMonth m) = error' $ "nextmonthandday: month should be 1..12, not "++show m
+  | not (validDay   n) = error' $ "nextmonthandday: day should be 1..31, not "  ++show n
+  | mdthisyear >= date = mdthisyear
+  | otherwise          = mdnextyear
+  where
+    s = startofyear date
+    advancetomonth = applyN (m-1) nextmonth
+    advancetoday = addDays (toInteger n-1)
+    mdthisyear = advancetoday $ advancetomonth s
+    mdnextyear = advancetoday $ advancetomonth $ nextyear s
 
--- | For given date d find month-long interval that starts on nth day of month
--- and covers it.
--- The given day of month should be basically valid (1-31), or an error is raised.
+-- | Find the next occurrence of the specified day of month, on or after the given date.
+-- The day of month should be 1-31, or an error will be raised.
 --
--- Examples: lets take 2017-11-22. Month-long intervals covering it that
--- start on 1st-22nd of month will start in Nov. However
--- intervals that start on 23rd-30th of month should start in Oct:
 -- >>> let wed22nd = fromGregorian 2017 11 22
--- >>> nthdayofmonthcontaining 1 wed22nd
--- 2017-11-01
--- >>> nthdayofmonthcontaining 12 wed22nd
--- 2017-11-12
--- >>> nthdayofmonthcontaining 22 wed22nd
+-- >>> nextnthdayofmonth 21 wed22nd
+-- 2017-12-21
+-- >>> nextnthdayofmonth 22 wed22nd
 -- 2017-11-22
--- >>> nthdayofmonthcontaining 23 wed22nd
--- 2017-10-23
--- >>> nthdayofmonthcontaining 30 wed22nd
--- 2017-10-30
-nthdayofmonthcontaining :: MonthDay -> Day -> Day
-nthdayofmonthcontaining md date
+-- >>> nextnthdayofmonth 23 wed22nd
+-- 2017-11-23
+nextnthdayofmonth :: MonthDay -> Day -> Day
+nextnthdayofmonth n date
   -- PARTIAL:
-  | not (validDay md) = error' $ "nthdayofmonthcontaining: invalid day "  ++show md
-  | nthOfSameMonth <= date = nthOfSameMonth
-  | otherwise = nthOfPrevMonth
-  where nthOfSameMonth = nthdayofmonth md s
-        nthOfPrevMonth = nthdayofmonth md $ prevmonth s
-        s = startofmonth date
+  | not (validDay n)       = error' $ "nextnthdayofmonth: day should be 1..31, not "  ++show n
+  | nthofthismonth >= date = nthofthismonth
+  | otherwise              = nthofnextmonth
+  where
+    s = startofmonth date
+    nthofthismonth = nthdayofmonth n s
+    nthofnextmonth = nthdayofmonth n $ nextmonth s
 
 -- | For given date d find week-long interval that starts on nth day of week
 -- and covers it.
@@ -650,37 +709,66 @@ nthdayofweekcontaining n d | nthOfSameWeek <= d = nthOfSameWeek
           nthOfPrevWeek = addDays (toInteger n-1) $ prevweek s
           s = startofweek d
 
--- | For given date d find month-long interval that starts on nth weekday of month
--- and covers it.
---
--- Examples: 2017-11-22 is 3rd Wed of Nov. Month-long intervals that cover it and
--- start on 1st-4th Wed will start in Nov. However
--- intervals that start on 4th Thu or Fri or later should start in Oct:
--- >>> let wed22nd = fromGregorian 2017 11 22
--- >>> nthweekdayofmonthcontaining 1 3 wed22nd
--- 2017-11-01
--- >>> nthweekdayofmonthcontaining 3 2 wed22nd
--- 2017-11-21
--- >>> nthweekdayofmonthcontaining 4 3 wed22nd
--- 2017-11-22
--- >>> nthweekdayofmonthcontaining 4 4 wed22nd
--- 2017-10-26
--- >>> nthweekdayofmonthcontaining 4 5 wed22nd
--- 2017-10-27
-nthweekdayofmonthcontaining :: Int -> WeekDay -> Day -> Day
-nthweekdayofmonthcontaining n wd d | nthWeekdaySameMonth <= d  = nthWeekdaySameMonth
-                                   | otherwise = nthWeekdayPrevMonth
-    where nthWeekdaySameMonth = advancetonthweekday n wd $ startofmonth d
-          nthWeekdayPrevMonth = advancetonthweekday n wd $ prevmonth d
+-- -- | Find the next occurrence of some weekday, on or after the given date d.
+-- --
+-- -- >>> let wed22nd = fromGregorian 2017 11 22
+-- -- >>> nextnthdayofweek 1 wed22nd
+-- -- 2017-11-20
+-- -- >>> nextnthdayofweek 2 wed22nd
+-- -- 2017-11-21
+-- -- >>> nextnthdayofweek 3 wed22nd
+-- -- 2017-11-22
+-- -- >>> nextnthdayofweek 4 wed22nd
+-- -- 2017-11-16
+-- -- >>> nextnthdayofweek 5 wed22nd
+-- -- 2017-11-17
+-- nextdayofweek :: WeekDay -> Day -> Day
+-- nextdayofweek n d | nthOfSameWeek <= d = nthOfSameWeek
+--                            | otherwise = nthOfPrevWeek
+--     where nthOfSameWeek = addDays (toInteger n-1) s
+--           nthOfPrevWeek = addDays (toInteger n-1) $ prevweek s
+--           s = startofweek d
 
--- | Advance to nth weekday wd after given start day s
+-- | Find the next occurrence of some nth weekday of a month, on or after the given date d.
+--
+-- >>> let wed22nd = fromGregorian 2017 11 22
+-- >>> nextNthWeekdayOfMonth 3 3 wed22nd  -- next third wednesday
+-- 2017-12-20
+-- >>> nextNthWeekdayOfMonth 4 3 wed22nd  -- next fourth wednesday
+-- 2017-11-22
+-- >>> nextNthWeekdayOfMonth 5 3 wed22nd  -- next fifth wednesday
+-- 2017-11-29
+nextNthWeekdayOfMonth :: Int -> WeekDay -> Day -> Day
+nextNthWeekdayOfMonth n wd d
+  | nthweekdaythismonth >= d = nthweekdaythismonth
+  | otherwise                = nthweekdaynextmonth
+  where
+    nthweekdaythismonth = advanceToNthWeekday n wd $ startofmonth d
+    nthweekdaynextmonth = advanceToNthWeekday n wd $ nextmonth d
+
+-- | Find the previous occurrence of some nth weekday of a month, on or before the given date d.
+--
+-- >>> let wed22nd = fromGregorian 2017 11 22
+-- >>> prevNthWeekdayOfMonth 4 3 wed22nd
+-- 2017-11-22
+-- >>> prevNthWeekdayOfMonth 5 2 wed22nd
+-- 2017-10-31
+prevNthWeekdayOfMonth :: Int -> WeekDay -> Day -> Day
+prevNthWeekdayOfMonth n wd d
+  | nthweekdaythismonth <= d = nthweekdaythismonth
+  | otherwise                = nthweekdayprevmonth
+  where
+    nthweekdaythismonth = advanceToNthWeekday n wd $ startofmonth d
+    nthweekdayprevmonth = advanceToNthWeekday n wd $ prevmonth d
+
+-- | Advance to the nth occurrence of the given weekday, on or after the given date.
 -- Can call error.
-advancetonthweekday :: Int -> WeekDay -> Day -> Day
-advancetonthweekday n wd s =
+advanceToNthWeekday :: Int -> WeekDay -> Day -> Day
+advanceToNthWeekday n wd s =
   -- PARTIAL:
   maybe err (addWeeks (n-1)) $ firstMatch (>=s) $ iterate (addWeeks 1) $ firstweekday s
   where
-    err = error' "advancetonthweekday: should not happen"
+    err = error' "advanceToNthWeekday: should not happen"
     addWeeks k = addDays (7 * toInteger k)
     firstMatch p = headMay . dropWhile (not . p)
     firstweekday = addDays (toInteger wd-1) . startofweek
@@ -689,26 +777,47 @@ advancetonthweekday n wd s =
 -- parsing
 
 -- -- | Parse a couple of date-time string formats to a time type.
--- parsedatetimeM :: String -> Maybe LocalTime
--- parsedatetimeM s = asum [
---     parseTime defaultTimeLocale "%Y/%m/%d %H:%M:%S" s,
---     parseTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" s
+-- parsedatetime :: String -> Maybe LocalTime
+-- parsedatetime s = asum [
+--     parseTimeM TruedefaultTimeLocale "%Y/%m/%d %H:%M:%S" s,
+--     parseTimeM TruedefaultTimeLocale "%Y-%m-%d %H:%M:%S" s
 --     ]
 
--- | Try to parse a couple of date string formats:
--- `YYYY-MM-DD`, `YYYY/MM/DD` or `YYYY.MM.DD`, with leading zeros required.
--- For internal use, not quite the same as the journal's "simple dates".
--- >>> parsedateM "2008/02/03"
+-- | A simple date parsing helper: parses these YMD date string formats:
+-- `YYYY-MM-DD`, `YYYY/MM/DD`, `YYYY.MM.DD` or `YYYYMMDD`,
+-- where the month and day each have two digits and the year has one or more.
+--
+-- This is different from the Smart Dates of the CLI and period expressions ("smartdate", below)
+-- and not quite the same as the Simple Dates of the journal ("datep", in Hledger.Read.Common).
+-- It's mainly for internal or interactive use, eg when debugging - 
+-- but currently is also used in a few user-facing places, such as:
+-- parsing --value's argument, 
+-- parsing .latest files,
+-- and parsing hledger's --version output (which uses unseparated dates).
+--
+-- Unseparated dates were added in 2025 for convenience.
+-- Note it means many integers will now parse successfully.
+--
+-- >>> parsedate "2008/02/03"
 -- Just 2008-02-03
--- >>> parsedateM "2008/02/03/"
+-- >>> parsedate "2008/02/03/"
 -- Nothing
--- >>> parsedateM "2008/02/30"
+-- >>> parsedate "2008/02/30"
 -- Nothing
-parsedateM :: String -> Maybe Day
-parsedateM s = asum [
+-- >>> parsedate "2025-01-01"
+-- Just 2025-01-01
+-- >>> parsedate "2025.01.01"
+-- Just 2025-01-01
+-- >>> parsedate "20250101"
+-- Just 2025-01-01
+-- >>> parsedate "00101"
+-- Just 0000-01-01
+parsedate :: String -> Maybe Day
+parsedate s = asum [
      parseTimeM True defaultTimeLocale "%Y-%m-%d" s,
      parseTimeM True defaultTimeLocale "%Y/%m/%d" s,
-     parseTimeM True defaultTimeLocale "%Y.%m.%d" s
+     parseTimeM True defaultTimeLocale "%Y.%m.%d" s,
+     parseTimeM True defaultTimeLocale "%Y%m%d" s
      ]
 
 {-|
@@ -726,6 +835,10 @@ Examples:
 > october, oct                                (start of month in current year)
 > yesterday, today, tomorrow                  (-1, 0, 1 days from today)
 > last/this/next day/week/month/quarter/year  (-1, 0, 1 periods from the current period)
+> last/this/next monday/mon                   (the previous or next named weekday; this=next)
+> last/next january/jan                       (previous or next start of named month; this disallowed to avoid confusion)
+> in n days/weeks/months/quarters/years       (n periods from the current period)
+> n days/weeks/months/quarters/years ago      (-n periods from the current period)
 > 20181201                                    (8 digit YYYYMMDD with valid year month and day)
 > 201812                                      (6 digit YYYYMM with valid year and month)
 
@@ -741,11 +854,11 @@ Eg:
 YYYYMMDD is parsed as year-month-date if those parts are valid
 (>=4 digits, 1-12, and 1-31 respectively):
 >>> parsewith (smartdate <* eof) "20181201"
-Right (SmartAssumeStart 2018 (Just (12,Just 1)))
+Right (SmartCompleteDate 2018-12-01)
 
 YYYYMM is parsed as year-month-01 if year and month are valid:
 >>> parsewith (smartdate <* eof) "201804"
-Right (SmartAssumeStart 2018 (Just (4,Nothing)))
+Right (SmartAssumeStart 2018 (Just 4))
 
 With an invalid month, it's parsed as a year:
 >>> parsewith (smartdate <* eof) "201813"
@@ -763,19 +876,39 @@ Right (SmartAssumeStart 201813012 Nothing)
 smartdate :: TextParser m SmartDate
 smartdate = choice'
   -- XXX maybe obscures date errors ? see ledgerdate
-    [ yyyymmdd, ymd
+    [ relativeinterval
+    , relativemonth
+    , relativeweekday
+    , yyyymmdd
+    , ymd
     , (\(m,d) -> SmartFromReference (Just m) d) <$> md
     , failIfInvalidDate . SmartFromReference Nothing =<< decimal
     , SmartMonth <$> (month <|> mon)
-    , SmartRelative This Day <$ string' "today"
-    , SmartRelative Last Day <$ string' "yesterday"
-    , SmartRelative Next Day <$ string' "tomorrow"
-    , liftA2 SmartRelative (seqP <* skipNonNewlineSpaces) intervalP
+    , SmartRelative (-1) Day <$ string' "yesterday"
+    , SmartRelative 0    Day <$ string' "today"
+    , SmartRelative 1    Day <$ string' "tomorrow"
     ]
   where
-    seqP = choice [This <$ string' "this", Last <$ string' "last", Next <$ string' "next"]
-    intervalP = choice [Day <$ string' "day", Week <$ string' "week", Month <$ string' "month",
-                        Quarter <$ string' "quarter", Year <$ string' "year"]
+    relativeinterval = do
+        optional $ string' "in" <* skipNonNewlineSpaces
+        num      <- relativenump <* skipNonNewlineSpaces
+        interval <- intervalp <* skipNonNewlineSpaces
+        sign     <- choice [negate <$ string' "ago", id <$ string' "ahead", pure id]
+        return $ SmartRelative (sign num) interval
+        where
+          relativenump = choice [ 0 <$ string' "this", -1 <$ string' "last", 1 <$ string' "next", signed skipNonNewlineSpaces decimal ]
+          intervalp    = choice [ Day <$ string' "day", Week <$ string' "week", Month <$ string' "month"
+                                , Quarter <$ string' "quarter", Year <$ string' "year" ] <* optional (char' 's')
+    relativemonth = do
+      dir <- choice [LT <$ string' "last", EQ <$ string' "this", GT <$ string' "next"]
+      skipNonNewlineSpaces
+      m <- (month <|> mon)
+      return $ SmartRelativeMonth dir m
+    relativeweekday = do
+      dir <- choice [LT <$ string' "last", EQ <$ string' "this", GT <$ string' "next"]
+      skipNonNewlineSpaces
+      w <- weekday
+      return $ SmartRelativeWeekDay dir w
 
 -- | Like smartdate, but there must be nothing other than whitespace after the date.
 smartdateonly :: TextParser m SmartDate
@@ -797,31 +930,39 @@ validDay n = n >= 1 && n <= 31
 failIfInvalidDate :: Fail.MonadFail m => SmartDate -> m SmartDate
 failIfInvalidDate s = unless isValid (Fail.fail $ "bad smart date: " ++ show s) $> s
   where isValid = case s of
-            SmartAssumeStart y (Just (m, md)) -> isJust $ fromGregorianValid y m (fromMaybe 1 md)
-            SmartFromReference mm d           -> isJust $ fromGregorianValid 2004 (fromMaybe 1 mm) d
-            SmartMonth m                      -> validMonth m
-            _                                 -> True
+            SmartAssumeStart _ (Just m) -> validMonth m
+            SmartFromReference mm d     -> isJust $ fromGregorianValid 2004 (fromMaybe 1 mm) d
+            SmartMonth m                -> validMonth m
+            _                           -> True
+
+showBadDate :: Integer -> Int -> Int -> String
+showBadDate y m d = "bad smart date: " ++ show y ++ "-" ++ show m ++ "-" ++ show d
 
 yyyymmdd :: TextParser m SmartDate
 yyyymmdd = do
   y <- read <$> count 4 digitChar
   m <- read <$> count 2 digitChar
-  d <- optional $ read <$> count 2 digitChar
-  let date = SmartAssumeStart y $ Just (m, d)
-  failIfInvalidDate date
+  mdy <- optional $ read <$> count 2 digitChar
+  case mdy of
+      Nothing -> failIfInvalidDate $ SmartAssumeStart y (Just m)
+      Just d  -> maybe (Fail.fail $ showBadDate y m d) (return . SmartCompleteDate) $
+                   fromGregorianValid y m d
 
 ymd :: TextParser m SmartDate
 ymd = do
     y <- yearp
-    fmap (SmartAssumeStart y) . optional . try $ do
+    emd <- optional . try $ do
         sep <- datesepchar
         m <- decimal
         unless (validMonth m) $ Fail.fail ("Bad month " <> show m)
-        fmap (m,) . optional . try $ do
+        option (Left m) . try $ Right <$> do
             _ <- char sep
             d <- decimal
-            failIfInvalidDate $ SmartAssumeStart y (Just (m, Just d))
-            return d
+            maybe (Fail.fail $ showBadDate y m d) return $ fromGregorianValid y m d
+    return $ case emd of
+        Nothing          -> SmartAssumeStart y Nothing
+        Just (Left m)    -> SmartAssumeStart y (Just m)
+        Just (Right day) -> SmartCompleteDate day
 
 md :: TextParser m (Month, MonthDay)
 md = do
@@ -859,7 +1000,7 @@ weekday = do
                          show wday <> " in " <> show (weekdays ++ weekdayabbrevs)
 
 weekdaysp :: TextParser m [Int]
-weekdaysp = fmap head . group . sort <$> sepBy1 weekday (string' ",")
+weekdaysp = fmap headErr . group . sort <$> sepBy1 weekday (string' ",")  -- PARTIAL headErr will succeed because of sepBy1
 
 -- | Parse a period expression, specifying a date span and optionally
 -- a reporting interval. Requires a reference "today" date for
@@ -882,39 +1023,41 @@ weekdaysp = fmap head . group . sort <$> sepBy1 weekday (string' ",")
 -- >>> p "every week to 2009"
 -- Right (Weeks 1,DateSpan ..2008-12-31)
 -- >>> p "every 2nd day of month"
--- Right (DayOfMonth 2,DateSpan ..)
+-- Right (MonthDay 2,DateSpan ..)
 -- >>> p "every 2nd day"
--- Right (DayOfMonth 2,DateSpan ..)
+-- Right (MonthDay 2,DateSpan ..)
 -- >>> p "every 2nd day 2009.."
--- Right (DayOfMonth 2,DateSpan 2009-01-01..)
+-- Right (MonthDay 2,DateSpan 2009-01-01..)
 -- >>> p "every 2nd day 2009-"
--- Right (DayOfMonth 2,DateSpan 2009-01-01..)
+-- Right (MonthDay 2,DateSpan 2009-01-01..)
 -- >>> p "every 29th Nov"
--- Right (DayOfYear 11 29,DateSpan ..)
+-- Right (MonthAndDay 11 29,DateSpan ..)
 -- >>> p "every 29th nov ..2009"
--- Right (DayOfYear 11 29,DateSpan ..2008-12-31)
+-- Right (MonthAndDay 11 29,DateSpan ..2008-12-31)
 -- >>> p "every nov 29th"
--- Right (DayOfYear 11 29,DateSpan ..)
+-- Right (MonthAndDay 11 29,DateSpan ..)
 -- >>> p "every Nov 29th 2009.."
--- Right (DayOfYear 11 29,DateSpan 2009-01-01..)
+-- Right (MonthAndDay 11 29,DateSpan 2009-01-01..)
 -- >>> p "every 11/29 from 2009"
--- Right (DayOfYear 11 29,DateSpan 2009-01-01..)
+-- Right (MonthAndDay 11 29,DateSpan 2009-01-01..)
+-- >>> p "every 11/29 since 2009"
+-- Right (MonthAndDay 11 29,DateSpan 2009-01-01..)
 -- >>> p "every 2nd Thursday of month to 2009"
--- Right (WeekdayOfMonth 2 4,DateSpan ..2008-12-31)
+-- Right (NthWeekdayOfMonth 2 4,DateSpan ..2008-12-31)
 -- >>> p "every 1st monday of month to 2009"
--- Right (WeekdayOfMonth 1 1,DateSpan ..2008-12-31)
+-- Right (NthWeekdayOfMonth 1 1,DateSpan ..2008-12-31)
 -- >>> p "every tue"
 -- Right (DaysOfWeek [2],DateSpan ..)
 -- >>> p "every 2nd day of week"
 -- Right (DaysOfWeek [2],DateSpan ..)
 -- >>> p "every 2nd day of month"
--- Right (DayOfMonth 2,DateSpan ..)
+-- Right (MonthDay 2,DateSpan ..)
 -- >>> p "every 2nd day"
--- Right (DayOfMonth 2,DateSpan ..)
+-- Right (MonthDay 2,DateSpan ..)
 -- >>> p "every 2nd day 2009.."
--- Right (DayOfMonth 2,DateSpan 2009-01-01..)
+-- Right (MonthDay 2,DateSpan 2009-01-01..)
 -- >>> p "every 2nd day of month 2009.."
--- Right (DayOfMonth 2,DateSpan 2009-01-01..)
+-- Right (MonthDay 2,DateSpan 2009-01-01..)
 periodexprp :: Day -> TextParser m (Interval, DateSpan)
 periodexprp rdate = do
   skipNonNewlineSpaces
@@ -943,9 +1086,9 @@ reportingintervalp = choice'
     , Months 2 <$ string' "bimonthly"
     , string' "every" *> skipNonNewlineSpaces *> choice'
         [ DaysOfWeek . pure <$> (nth <* skipNonNewlineSpaces <* string' "day" <* of_ "week")
-        , DayOfMonth <$> (nth <* skipNonNewlineSpaces <* string' "day" <* optOf_ "month")
-        , liftA2 WeekdayOfMonth nth $ skipNonNewlineSpaces *> weekday <* optOf_ "month"
-        , uncurry DayOfYear <$> (md <* optOf_ "year")
+        , MonthDay <$> (nth <* skipNonNewlineSpaces <* string' "day" <* optOf_ "month")
+        , liftA2 NthWeekdayOfMonth nth $ skipNonNewlineSpaces *> weekday <* optOf_ "month"
+        , uncurry MonthAndDay <$> (md <* optOf_ "year")
         , DaysOfWeek <$> weekdaysp
         , DaysOfWeek [1..5] <$ string' "weekday"
         , DaysOfWeek [6..7] <$ string' "weekendday"
@@ -964,30 +1107,25 @@ reportingintervalp = choice'
     optOf_ period = optional . try $ of_ period
 
     nth = decimal <* choice (map string' ["st","nd","rd","th"])
-    d_o_y = runPermutation $ liftA2 DayOfYear (toPermutation $ (month <|> mon) <* skipNonNewlineSpaces)
-                                              (toPermutation $ nth <* skipNonNewlineSpaces)
+    d_o_y = runPermutation $ liftA2 MonthAndDay (toPermutation $ (month <|> mon) <* skipNonNewlineSpaces)
+                                                (toPermutation $ nth <* skipNonNewlineSpaces)
 
     -- Parse any of several variants of a basic interval, eg "daily", "every day", "every N days".
-    tryinterval :: String -> String -> (Int -> Interval) -> TextParser m Interval
+    tryinterval :: Text -> Text -> (Int -> Interval) -> TextParser m Interval
     tryinterval singular compact intcons = intcons <$> choice'
-        [ 1 <$ string' compact'
+        [ 1 <$ string' compact
         , string' "every" *> skipNonNewlineSpaces *> choice
-            [ 1 <$ string' singular'
-            , decimal <* skipNonNewlineSpaces <* string' plural'
+            [ 1 <$ string' singular
+            , decimal <* skipNonNewlineSpaces <* string' (singular <> "s")
             ]
         ]
-      where
-        compact'  = T.pack compact
-        singular' = T.pack singular
-        plural'   = T.pack $ singular ++ "s"
 
 periodexprdatespanp :: Day -> TextParser m DateSpan
-periodexprdatespanp rdate = choice $ map try [
+periodexprdatespanp rdate = choice' [
                             doubledatespanp rdate,
-                            quarterdatespanp rdate,
                             fromdatespanp rdate,
                             todatespanp rdate,
-                            justdatespanp rdate
+                            indatespanp rdate
                            ]
 
 -- |
@@ -1003,94 +1141,102 @@ periodexprdatespanp rdate = choice $ map try [
 -- Right DateSpan 2017
 doubledatespanp :: Day -> TextParser m DateSpan
 doubledatespanp rdate = liftA2 fromToSpan
-    (optional (string' "from" *> skipNonNewlineSpaces) *> smartdate)
+    (optional ((string' "from" <|> string' "since") *> skipNonNewlineSpaces) *> smartdateorquarterstartp rdate)
     (skipNonNewlineSpaces *> choice [string' "to", string "..", string "-"]
-    *> skipNonNewlineSpaces *> smartdate)
+    *> skipNonNewlineSpaces *> smartdateorquarterstartp rdate)
   where
     fromToSpan = DateSpan `on` (Just . fixSmartDate rdate)
 
 -- |
--- >>> parsewith (quarterdatespanp (fromGregorian 2018 01 01) <* eof) "q1"
--- Right DateSpan 2018Q1
--- >>> parsewith (quarterdatespanp (fromGregorian 2018 01 01) <* eof) "Q1"
--- Right DateSpan 2018Q1
--- >>> parsewith (quarterdatespanp (fromGregorian 2018 01 01) <* eof) "2020q4"
--- Right DateSpan 2020Q4
-quarterdatespanp :: Day -> TextParser m DateSpan
-quarterdatespanp rdate = do
-    y <- yearp <|> pure (first3 $ toGregorian rdate)
-    q <- char' 'q' *> satisfy is4Digit
-    return . periodAsDateSpan $ QuarterPeriod y (digitToInt q)
-  where
-    is4Digit c = (fromIntegral (ord c - ord '1') :: Word) <= 3
-
+-- >>> let p = parsewith (fromdatespanp (fromGregorian 2024 02 02) <* eof)
+-- >>> p "2025-01-01.."
+-- Right DateSpan 2025-01-01..
+-- >>> p "2025Q1.."
+-- Right DateSpan 2025-01-01..
+-- >>> p "from q2"
+-- Right DateSpan 2024-04-01..
 fromdatespanp :: Day -> TextParser m DateSpan
 fromdatespanp rdate = fromSpan <$> choice
-    [ string' "from" *> skipNonNewlineSpaces *> smartdate
-    , smartdate <* choice [string "..", string "-"]
-    ]
+  [ (string' "from" <|> string' "since") *> skipNonNewlineSpaces *> smartdateorquarterstartp rdate
+  , smartdateorquarterstartp rdate <* choice [string "..", string "-"]
+  ]
   where
     fromSpan b = DateSpan (Just $ fixSmartDate rdate b) Nothing
 
+-- |
+-- >>> let p = parsewith (todatespanp (fromGregorian 2024 02 02) <* eof)
+-- >>> p "..2025-01-01"
+-- Right DateSpan ..2024-12-31
+-- >>> p "..2025Q1"
+-- Right DateSpan ..2024-12-31
+-- >>> p "to q2"
+-- Right DateSpan ..2024-03-31
 todatespanp :: Day -> TextParser m DateSpan
 todatespanp rdate =
-    choice [string' "to", string' "until", string "..", string "-"]
-    *> skipNonNewlineSpaces
-    *> (DateSpan Nothing . Just . fixSmartDate rdate <$> smartdate)
+  choice [string' "to", string' "until", string "..", string "-"]
+  *> skipNonNewlineSpaces
+  *> (DateSpan Nothing . Just . fixSmartDate rdate <$> smartdateorquarterstartp rdate)
 
-justdatespanp :: Day -> TextParser m DateSpan
-justdatespanp rdate =
-    optional (string' "in" *> skipNonNewlineSpaces)
-    *> (spanFromSmartDate rdate <$> smartdate)
+-- |j
+-- >>> let p = parsewith (indatespanp (fromGregorian 2024 02 02) <* eof)
+-- >>> p "2025-01-01"
+-- Right DateSpan 2025-01-01
+-- >>> p "2025q1"
+-- Right DateSpan 2025Q1
+-- >>> p "in Q2"
+-- Right DateSpan 2024Q2
+indatespanp :: Day -> TextParser m DateSpan
+indatespanp rdate =
+  optional (string' "in" *> skipNonNewlineSpaces)
+  *> choice' [
+    quarterspanp rdate,
+    spanFromSmartDate rdate <$> smartdate
+  ]
+
+-- Helper: parse a quarter number, optionally preceded by a year.
+quarterp :: Day -> TextParser m (Year, Int)
+quarterp rdate = do
+  y <- yearp <|> pure (first3 $ toGregorian rdate)
+  n <- char' 'q' *> satisfy (`elem` ['1' .. '4']) >>= return . digitToInt
+  return (y, n)
+
+-- | Parse a single quarter (YYYYqN or qN, case insensitive q) as a date span.
+--
+-- >>> parsewith (quarterspanp (fromGregorian 2018 01 01) <* eof) "q1"
+-- Right DateSpan 2018Q1
+-- >>> parsewith (quarterspanp (fromGregorian 2018 01 01) <* eof) "Q1"
+-- Right DateSpan 2018Q1
+-- >>> parsewith (quarterspanp (fromGregorian 2018 01 01) <* eof) "2020q4"
+-- Right DateSpan 2020Q4
+quarterspanp :: Day -> TextParser m DateSpan
+quarterspanp rdate = do
+  (y,q) <- quarterp rdate
+  return . periodAsDateSpan $ QuarterPeriod y q
+
+-- | Parse a quarter (YYYYqN or qN, case insensitive q) as its start date.
+--
+-- >>> parsewith (quarterstartp (fromGregorian 2025 02 02) <* eof) "q1"
+-- Right 2025-01-01
+-- >>> parsewith (quarterstartp (fromGregorian 2025 02 02) <* eof) "Q2"
+-- Right 2025-04-01
+-- >>> parsewith (quarterstartp (fromGregorian 2025 02 02) <* eof) "2025q4"
+-- Right 2025-10-01
+quarterstartp :: Day -> TextParser m Day
+quarterstartp rdate = do
+  (y,q) <- quarterp rdate
+  return $
+    fromMaybe (error' "Hledger.Data.Dates.quarterstartp: invalid date found") $  -- PARTIAL, shouldn't happen
+    periodStart $ QuarterPeriod y q
+
+smartdateorquarterstartp :: Day -> TextParser m SmartDate
+smartdateorquarterstartp rdate = choice' [SmartCompleteDate <$> quarterstartp rdate, smartdate]
 
 nulldatespan :: DateSpan
 nulldatespan = DateSpan Nothing Nothing
 
--- | A datespan of zero length, that matches no date.
+-- | An exact datespan of zero length, that matches no date.
 emptydatespan :: DateSpan
-emptydatespan = DateSpan (Just $ addDays 1 nulldate) (Just nulldate)
+emptydatespan = DateSpan (Just $ Exact $ addDays 1 nulldate) (Just $ Exact nulldate)
 
 nulldate :: Day
 nulldate = fromGregorian 0 1 1
-
-
--- tests
-
-tests_Dates = testGroup "Dates"
-  [ testCase "weekday" $ do
-      splitSpan (DaysOfWeek [1..5]) (DateSpan (Just $ fromGregorian 2021 07 01) (Just $ fromGregorian 2021 07 08))
-        @?= [ (DateSpan (Just $ fromGregorian 2021 06 28) (Just $ fromGregorian 2021 06 29))
-            , (DateSpan (Just $ fromGregorian 2021 06 29) (Just $ fromGregorian 2021 06 30))
-            , (DateSpan (Just $ fromGregorian 2021 06 30) (Just $ fromGregorian 2021 07 01))
-            , (DateSpan (Just $ fromGregorian 2021 07 01) (Just $ fromGregorian 2021 07 02))
-            , (DateSpan (Just $ fromGregorian 2021 07 02) (Just $ fromGregorian 2021 07 05))
-            -- next week
-            , (DateSpan (Just $ fromGregorian 2021 07 05) (Just $ fromGregorian 2021 07 06))
-            , (DateSpan (Just $ fromGregorian 2021 07 06) (Just $ fromGregorian 2021 07 07))
-            , (DateSpan (Just $ fromGregorian 2021 07 07) (Just $ fromGregorian 2021 07 08))
-            ]
-
-      splitSpan (DaysOfWeek [1, 5]) (DateSpan (Just $ fromGregorian 2021 07 01) (Just $ fromGregorian 2021 07 08))
-        @?= [ (DateSpan (Just $ fromGregorian 2021 06 28) (Just $ fromGregorian 2021 07 02))
-            , (DateSpan (Just $ fromGregorian 2021 07 02) (Just $ fromGregorian 2021 07 05))
-            -- next week
-            , (DateSpan (Just $ fromGregorian 2021 07 05) (Just $ fromGregorian 2021 07 09))
-            ]
-
-  , testCase "match dayOfWeek" $ do
-      let dayofweek n s = splitspan (nthdayofweekcontaining n) (applyN (n-1) nextday . nextweek) s
-          match ds day = dayofweek day ds == splitSpan (DaysOfWeek [day]) ds @?= True
-          ys2021 = fromGregorian 2021 01 01
-          ye2021 = fromGregorian 2021 12 31
-          ys2022 = fromGregorian 2022 01 01
-      mapM_ (match (DateSpan (Just ys2021) (Just ye2021))) [1..7]
-      mapM_ (match (DateSpan (Just ys2021) (Just ys2022))) [1..7]
-      mapM_ (match (DateSpan (Just ye2021) (Just ys2022))) [1..7]
-
-      mapM_ (match (DateSpan (Just ye2021) Nothing)) [1..7]
-      mapM_ (match (DateSpan (Just ys2022) Nothing)) [1..7]
-
-      mapM_ (match (DateSpan Nothing (Just ye2021))) [1..7]
-      mapM_ (match (DateSpan Nothing (Just ys2022))) [1..7]
-
-  ]

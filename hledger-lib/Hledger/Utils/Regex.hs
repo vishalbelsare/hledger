@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
 {-|
 
 Easy regular expression helpers, currently based on regex-tdfa. These should:
@@ -42,6 +38,12 @@ Current limitations:
 
 -}
 
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+
 module Hledger.Utils.Regex (
   -- * Regexp type and constructors
    Regexp(reString)
@@ -55,20 +57,24 @@ module Hledger.Utils.Regex (
    -- * total regex operations
   ,regexMatch
   ,regexMatchText
+  ,regexMatchTextGroups
   ,regexReplace
   ,regexReplaceUnmemo
   ,regexReplaceAllBy
   )
 where
 
+import Control.DeepSeq (NFData(..), rwhnf)
 import Control.Monad (foldM)
 import Data.Aeson (ToJSON(..), Value(String))
 import Data.Array ((!), elems, indices)
 import Data.Char (isDigit)
+#if !MIN_VERSION_base(4,20,0)
 import Data.List (foldl')
+#endif
 import Data.MemoUgly (memo)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Text.Regex.TDFA (
   Regex, CompOption(..), defaultCompOpt, defaultExecOpt,
   makeRegexOptsM, AllMatches(getAllMatches), match, MatchText,
@@ -99,11 +105,11 @@ instance Show Regexp where
                              RegexpCI _ _ -> showString "RegexpCI "
 
 instance Read Regexp where
-  readsPrec d r =  readParen (d > app_prec) (\r -> [(toRegexCI' m,t) |
-                                                    ("RegexCI",s) <- lex r,
+  readsPrec d r =  readParen (d > app_prec) (\r' -> [(toRegexCI' m,t) |
+                                                    ("RegexCI",s) <- lex r',
                                                     (m,t) <- readsPrec (app_prec+1) s]) r
-                ++ readParen (d > app_prec) (\r -> [(toRegex' m, t) |
-                                                    ("Regex",s) <- lex r,
+                ++ readParen (d > app_prec) (\r' -> [(toRegex' m, t) |
+                                                    ("Regex",s) <- lex r',
                                                     (m,t) <- readsPrec (app_prec+1) s]) r
     where app_prec = 10
 
@@ -123,6 +129,8 @@ instance RegexContext Regexp String String where
   match = match . reCompiled
   matchM = matchM . reCompiled
 
+instance NFData Regexp where rnf = rwhnf
+
 -- Convert a Regexp string to a compiled Regex, or return an error message.
 toRegex :: Text -> Either RegexError Regexp
 toRegex = memo $ \s -> mkRegexErr s (Regexp s <$> makeRegexM (T.unpack s))  -- Have to unpack here because Text instance in regex-tdfa only appears in 1.3.1
@@ -134,7 +142,7 @@ toRegexCI = memo $ \s -> mkRegexErr s (RegexpCI s <$> makeRegexOptsM defaultComp
 -- | Make a nice error message for a regexp error.
 mkRegexErr :: Text -> Maybe a -> Either RegexError a
 mkRegexErr s = maybe (Left errmsg) Right
-  where errmsg = T.unpack $ "this regular expression could not be compiled: " <> s
+  where errmsg = T.unpack $ "This regular expression is invalid or unsupported, please correct it:\n" <> s
 
 -- Convert a Regexp string to a compiled Regex, throw an error
 toRegex' :: Text -> Regexp
@@ -161,10 +169,18 @@ regexMatch = matchTest
 
 -- | Tests whether a Regexp matches a Text.
 --
--- This currently unpacks the Text to a String an works on that. This is due to
--- a performance bug in regex-tdfa (#9), which may or may not be relevant here.
+-- This currently unpacks the Text to a String, to work around a performance bug
+-- in regex-tdfa (#9), which may or may not be relevant here.
 regexMatchText :: Regexp -> Text -> Bool
 regexMatchText r = matchTest r . T.unpack
+
+-- | Return a (possibly empty) list of match groups derived by applying the
+-- Regex to a Text.
+regexMatchTextGroups :: Regexp -> Text -> [Text]
+regexMatchTextGroups r txt = let
+    pat = reCompiled r
+    (_,_,_,matches) = match pat txt :: (Text,Text,Text,[Text])
+    in matches
 
 --------------------------------------------------------------------------------
 -- new total functions
@@ -186,29 +202,31 @@ regexReplace re repl = memo $ regexReplaceUnmemo re repl
 -- but there can still be a runtime error from the replacement
 -- pattern, eg a backreference referring to a nonexistent match group.)
 regexReplaceUnmemo :: Regexp -> Replacement -> String -> Either RegexError String
-regexReplaceUnmemo re repl s = foldM (replaceMatch repl) s (reverse $ match (reCompiled re) s :: [MatchText String])
+regexReplaceUnmemo re repl str = foldM (replaceMatch repl) str (reverse $ match (reCompiled re) str :: [MatchText String])
   where
     -- Replace one match within the string with the replacement text
     -- appropriate for this match. Or return an error message.
     replaceMatch :: Replacement -> String -> MatchText String -> Either RegexError String
     replaceMatch replpat s matchgroups =
-      erepl >>= \repl -> Right $ pre ++ repl ++ post
-      where
-        ((_,(off,len)):_) = elems matchgroups  -- groups should have 0-based indexes, and there should always be at least one, since this is a match
-        (pre, post') = splitAt off s
-        post = drop len post'
-        -- The replacement text: the replacement pattern with all
-        -- numeric backreferences replaced by the appropriate groups
-        -- from this match. Or an error message.
-        erepl = regexReplaceAllByM backrefRegex (lookupMatchGroup matchgroups) replpat
+      case elems matchgroups of 
+        [] -> Right s
+        ((_,(off,len)):_) ->   -- groups should have 0-based indexes, and there should always be at least one, since this is a match
+          erpl >>= \rpl -> Right $ pre ++ rpl ++ post
           where
-            -- Given some match groups and a numeric backreference,
-            -- return the referenced group text, or an error message.
-            lookupMatchGroup :: MatchText String -> String -> Either RegexError String
-            lookupMatchGroup grps ('\\':s@(_:_)) | all isDigit s =
-              case read s of n | n `elem` indices grps -> Right $ fst (grps ! n)  -- PARTIAL: should not fail, all digits
-                             _                         -> Left $ "no match group exists for backreference \"\\"++s++"\""
-            lookupMatchGroup _ s = Left $ "lookupMatchGroup called on non-numeric-backreference \""++s++"\", shouldn't happen"
+            (pre, post') = splitAt off s
+            post = drop len post'
+            -- The replacement text: the replacement pattern with all
+            -- numeric backreferences replaced by the appropriate groups
+            -- from this match. Or an error message.
+            erpl = regexReplaceAllByM backrefRegex (lookupMatchGroup matchgroups) replpat
+              where
+                -- Given some match groups and a numeric backreference,
+                -- return the referenced group text, or an error message.
+                lookupMatchGroup :: MatchText String -> String -> Either RegexError String
+                lookupMatchGroup grps ('\\':s2@(_:_)) | all isDigit s2 =
+                  case read s2 of n | n `elem` indices grps -> Right $ fst (grps ! n)  -- PARTIAL: should not fail, all digits
+                                  _                         -> Left $ "no match group exists for backreference \"\\"++s++"\""
+                lookupMatchGroup _ s2 = Left $ "lookupMatchGroup called on non-numeric-backreference \""++s2++"\", shouldn't happen"
     backrefRegex = toRegex' "\\\\[0-9]+"  -- PARTIAL: should not fail
 
 -- regexReplace' :: Regexp -> Replacement -> String -> String
@@ -247,8 +265,8 @@ regexReplaceAllBy re transform s = prependdone rest
         go :: (Int,String,String->String) -> (Int,Int) ->  (Int,String,String->String)
         go (pos,todo,prepend) (off,len) =
           let (prematch, matchandrest) = splitAt (off - pos) todo
-              (matched, rest) = splitAt len matchandrest
-          in (off + len, rest, prepend . (prematch++) . (transform matched ++))
+              (matched, rest2) = splitAt len matchandrest
+          in (off + len, rest2, prepend . (prematch++) . (transform matched ++))
 
 -- Replace all occurrences of a regexp in a string, transforming each match
 -- with the given monadic function. Eg if the monad is Either, a Left result

@@ -1,4 +1,5 @@
-# 1. A trivial balance sheet. With no accounts of type Asset declared,
+# * balancesheet command
+# ** 1. A trivial balance sheet. With no accounts of type Asset declared,
 # a top-level "assets" account is autodetected as an Asset.
 <
 2016/1/1
@@ -18,11 +19,11 @@ Balance Sheet 2016-01-01
  Liabilities ||            
 -------------++------------
 -------------++------------
-             ||            
+             ||          0 
 =============++============
  Net:        ||          1 
 
-# 2. Account type autodetection is case insensitive.
+# ** 2. Account type autodetection is case insensitive.
 <
 2016/1/1
   ASSETS  1
@@ -41,11 +42,11 @@ Balance Sheet 2016-01-01
  Liabilities ||            
 -------------++------------
 -------------++------------
-             ||            
+             ||          0 
 =============++============
  Net:        ||          1 
 
-# 3. monthly balance sheet, normal positive sign
+# ** 3. monthly balance sheet, normal positive sign
 # old (arithmetic sign):
 #Balance Sheet
 #
@@ -68,7 +69,7 @@ Balance Sheet 2016-01-01
 # Total                ||         $1          $1          $1          $1          $1           0           0           0           0           0           0           0 
 #
 $ hledger -f sample.journal balancesheet -p 'monthly in 2008'
-Balance Sheet 2008-01-31..2008-12-31
+Monthly Balance Sheet 2008-01-31..2008-12-31
 
                       || 2008-01-31  2008-02-29  2008-03-31  2008-04-30  2008-05-31  2008-06-30  2008-07-31  2008-08-31  2008-09-30  2008-10-31  2008-11-30  2008-12-31 
 ======================++================================================================================================================================================
@@ -88,7 +89,7 @@ Balance Sheet 2008-01-31..2008-12-31
 ======================++================================================================================================================================================
  Net:                 ||         $1          $1          $1          $1          $1           0           0           0           0           0           0           0 
 
-# 4. monthly balance sheet in tree mode
+# ** 4. monthly balance sheet in tree mode
 # old (arithmetic sign):
 #              || 2008/01/31  2008/02/29  2008/03/31  2008/04/30  2008/05/31  2008/06/30  2008/07/31  2008/08/31  2008/09/30  2008/10/31  2008/11/30  2008/12/31 
 #==============++================================================================================================================================================
@@ -112,7 +113,7 @@ Balance Sheet 2008-01-31..2008-12-31
 # Total        ||         $1          $1          $1          $1          $1           0           0           0           0           0           0           0 
 #
 $ hledger -f sample.journal balancesheet -p 'monthly in 2008' --tree
-Balance Sheet 2008-01-31..2008-12-31
+Monthly Balance Sheet 2008-01-31..2008-12-31
 
                    || 2008-01-31  2008-02-29  2008-03-31  2008-04-30  2008-05-31  2008-06-30  2008-07-31  2008-08-31  2008-09-30  2008-10-31  2008-11-30  2008-12-31 
 ===================++================================================================================================================================================
@@ -134,11 +135,11 @@ Balance Sheet 2008-01-31..2008-12-31
 ===================++================================================================================================================================================
  Net:              ||         $1          $1          $1          $1          $1           0           0           0           0           0           0           0 
 
-# 5. monthly balancesheet with average column and without overall totals row.
+# ** 5. monthly balancesheet with average column and without overall totals row.
 # Total column is requested but not shown because balancesheet is in historical mode
 # by default (shows ending balances).
 $ hledger -f sample.journal balancesheet -p 'monthly in 2008' -NAT
-Balance Sheet 2008-01-31..2008-12-31
+Monthly Balance Sheet 2008-01-31..2008-12-31
 
                       || 2008-01-31  2008-02-29  2008-03-31  2008-04-30  2008-05-31  2008-06-30  2008-07-31  2008-08-31  2008-09-30  2008-10-31  2008-11-30  2008-12-31  Average 
 ======================++=========================================================================================================================================================
@@ -152,7 +153,7 @@ Balance Sheet 2008-01-31..2008-12-31
 ----------------------++---------------------------------------------------------------------------------------------------------------------------------------------------------
  liabilities:debts    ||          0           0           0           0           0           0           0           0           0           0           0         $-1        0 
 
-# 6. Tree output still works, #565
+# ** 6. Tree output still works, #565
 <
 2017/1/1
   (assets:b)  1
@@ -170,11 +171,11 @@ Balance Sheet 2017-01-01
  Liabilities ||            
 -------------++------------
 -------------++------------
-             ||            
+             ||          0 
 =============++============
  Net:        ||          1 
 
-# 7. Flat output still works, #552
+# ** 7. Flat output still works, #552
 <
 2017/1/1
   (assets:b)  1
@@ -192,16 +193,16 @@ Balance Sheet 2017-01-01
  Liabilities ||            
 -------------++------------
 -------------++------------
-             ||            
+             ||          0 
 =============++============
  Net:        ||          1 
 
-# 8. An empty section does not disrupt the overall totals, #588
+# ** 8. An empty section does not disrupt the overall totals, #588
 <
 2017/1/1
   (assets)  $1
 $ hledger -f- balancesheet -YA
-Balance Sheet 2017-12-31
+Yearly Balance Sheet 2017-12-31
 
              || 2017-12-31  Average 
 =============++=====================
@@ -214,34 +215,37 @@ Balance Sheet 2017-12-31
  Liabilities ||                     
 -------------++---------------------
 -------------++---------------------
-             ||                     
+             ||          0        0 
 =============++=====================
  Net:        ||         $1       $1 
 
-# 9. --pretty=yes uses unicode chars for borders
+# ** 9. With --pretty, tables use box-drawing characters and more borders.
 <
 2016/1/1
   assets  1
   b
-$ hledger -f - balancesheet -M --pretty=yes
-Balance Sheet 2016-01-31
 
-             ║ 2016-01-31 
-═════════════╬════════════
- Assets      ║            
-─────────────╫────────────
- assets      ║          1 
-─────────────╫────────────
-             ║          1 
-═════════════╬════════════
- Liabilities ║            
-─────────────╫────────────
-─────────────╫────────────
-             ║            
-═════════════╬════════════
- Net:        ║          1 
+$ hledger -f - balancesheet -M --pretty
+Monthly Balance Sheet 2016-01-31
 
-# 10. Check that accounts brought to zero by subaccount balances
+┌─────────────╥────────────┐
+│             ║ 2016-01-31 │
+╞═════════════╬════════════╡
+│ Assets      ║            │
+├─────────────╫────────────┤
+│ assets      ║          1 │
+├─────────────╫────────────┤
+│             ║          1 │
+╞═════════════╬════════════╡
+│ Liabilities ║            │
+├─────────────╫────────────┤
+├─────────────╫────────────┤
+│             ║          0 │
+╞═════════════╬════════════╡
+│ Net:        ║          1 │
+└─────────────╨────────────┘
+
+# ** 10. Check that accounts brought to zero by subaccount balances
 # are not erased from balancesheet
 <
 2018-10-01
@@ -275,11 +279,11 @@ Balance Sheet 2018-10-03
  Liabilities                         ||            
 -------------------------------------++------------
 -------------------------------------++------------
-                                     ||            
+                                     ||          0 
 =====================================++============
  Net:                                ||       $120 
 
-# 11. Check that starting balances are also filtered by subreport query. (See issue #1335)
+# ** 11. Check that starting balances are also filtered by subreport query. (See issue #1335)
 <
 2020-03-01 * Rent
     assets:a     -$1
@@ -302,33 +306,49 @@ Balance Sheet 2020-03-25
  Liabilities ||            
 -------------++------------
 -------------++------------
-             ||            
+             ||          0 
 =============++============
  Net:        ||         $1 
 
-# 12. CSV output. It always shows full account names, even in tree mode (#1566).
+# ** 12. CSV output. It always shows full account names, even in tree mode (#1566).
 $ hledger -f - balancesheet --tree --output-format=csv
 "Balance Sheet 2020-03-25",""
 "Account","2020-03-25"
 "Assets",""
 "assets:a","$1"
-"total","$1"
+"Total:","$1"
 "Liabilities",""
-"total"
+"Total:","0"
 "Net:","$1"
 
-# 13. CSV output supports --drop.
+# ** 13. CSV output supports --drop.
 $ hledger -f - balancesheet --tree --output-format=csv --drop 1
 "Balance Sheet 2020-03-25",""
 "Account","2020-03-25"
 "Assets",""
 "a","$1"
-"total","$1"
+"Total:","$1"
 "Liabilities",""
-"total"
+"Total:","0"
 "Net:","$1"
 
-# 14. In compound reports like balancesheet, parent accounts might not have
+<
+2020-03-01 * Rent
+    assets:a     -$10 000.00
+    expenses
+
+# ** 14. CSV output drops thousands separators
+$ hledger -f - balancesheet --output-format=csv
+"Balance Sheet 2020-03-01",""
+"Account","2020-03-01"
+"Assets",""
+"assets:a","$-10000.00"
+"Total:","$-10000.00"
+"Liabilities",""
+"Total:","0"
+"Net:","$-10000.00"
+
+# ** 15. In compound reports like balancesheet, parent accounts might not have
 # the appropriate type for a subreport, but in tree reports they should be 
 # displayed anyway, and with the right inclusive amounts and starting 
 # balances. (#1698)

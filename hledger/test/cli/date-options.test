@@ -1,3 +1,4 @@
+# * date options and arguments
 
 # Input for the following tests:
 
@@ -7,48 +8,44 @@
 2019-02-01
     (a)   1
 
-
-
-# Test the date output format.
+# ** 0. Test the date output format.
 # If this one fails, we got a wrong regex and the inverted regex tests below
 # are also wrong.
 $ hledger -f- register
 > /2019-01-01/
 
-# Show only February
+# ** 0. Show only February
 $ hledger -f- register -p 2019-02
 > !/2019-01-01/
 
-# The last -b overrides the first -b
+# ** 0. The last -b overrides the first -b
 # -> show only February
 $ hledger -f- register -b 2019 -b 2019-02
 > !/2019-01-01/
 
-# The last -e overrides the first -e
+# ** 0. The last -e overrides the first -e
 # Note that -e means: include posting/txns BEFORE this date.
 # -> show only January
 $ hledger -f- register -e 2020 -e 2019-02-01
 > !/2019-02-01/
 
-# -p's begin overrides -b because it comes last
+# ** 0. -p's begin overrides -b because it comes last
 # -> show only February
 $ hledger -f- register -b 2019-01-01 -p 2019-02
 > !/2019-01-01/
 
-# -e overrides -p's end because it come last
+# ** 0. -e overrides -p's end because it comes last
 # -> show only first part of January
 $ hledger -f- register -p 2019 -e 2019-01-20
 > !/2019-02-01/
 
-# Date options and queries are AND'ed and produce the intersection independent
-# of their order
+# ** 0. Date options and queries are AND'ed and produce the intersection independent of their order
 $ hledger -f- register date:2019-02 -p 2019
 > !/2019-01-01/
 $ hledger -f- register -p 2019 date:2019-02
 > !/2019-01-01/
 
-# Date queries are AND'ed and produce the intersection independent of their
-# order
+# ** 0. Date queries are AND'ed and produce the intersection independent of their order
 $ hledger -f- register date:2019 date:2019-02
 > !/2019-01-01/
 $ hledger -f- register date:2019-02 date:2019
@@ -56,27 +53,61 @@ $ hledger -f- register date:2019-02 date:2019
 $ hledger -f- register date:2019-02 date:2019-01-01-
 > !/2019-01-01/
 
-## Date options override date queries
+## ** 0. Date options override date queries
 #$ hledger -f- register date:2019-02 -p 2019
 #> /2019-01-01/
 
-# Smart dates https://github.com/simonmichael/hledger/issues/1079
+# ** 0. Smart dates https://github.com/simonmichael/hledger/issues/1079
 $ hledger -f- activity -b 2019-02-01 -e 'next year'
 > /2019-02-01 \*/
 
-# Date ranges
+# ** 0. Date ranges
 # Dotted range syntax, full dates
 $ hledger -f- reg date:2019-01-01..2019-02-01
 2019-01-01                      (a)                              2             2
 
-# Dotted range syntax, partial dates
+# ** 0. Dotted range syntax, partial dates
 $ hledger -f- reg date:2019-01..2019-02
 2019-01-01                      (a)                              2             2
 
-# Dashed range syntax, full dates
+# ** 0. Dashed range syntax, full dates
 $ hledger -f- reg date:2019-01-01-2019-02-01
 2019-01-01                      (a)                              2             2
 
-# Dashed range syntax, partial dates
+# ** 0. Dashed range syntax, partial dates
 $ hledger -f- reg date:2019-01-2019-02
 2019-01-01                      (a)                              2             2
+
+# ** 0. A "every Nth day (of month)" periodic rule will generate occurrences only after the start date. (#2218)
+<
+~ every 31st day from 2024-07 to 2024-09
+  (a)  1
+$ hledger -f- reg --forecast=2024
+2024-07-31                      (a)                              1             1
+2024-08-31                      (a)                              1             2
+
+# ** 0. Report interval can also be specified by a date: query.
+<
+2026-01-15
+    (a)    10
+
+2026-03-05
+    (a)    20
+
+2026-03-15
+    (a)    30
+
+$ hledger -f- reg -E date:monthly
+2026-01   a                                                     10            10
+2026-02                                                          0            10
+2026-03   a                                                     50            60
+
+# ** 0. date: queries override interval options, and the last date: query wins.
+$ hledger -f- reg -E date:monthly date:quarterly -Y
+2026Q1   a                                                      60            60
+
+# ** 0. Report interval in a date2: query is ignored.
+$ hledger -f- reg date2:"yearly in 2026"
+2026-01-15                      (a)                             10            10
+2026-03-05                      (a)                             20            30
+2026-03-15                      (a)                             30            60

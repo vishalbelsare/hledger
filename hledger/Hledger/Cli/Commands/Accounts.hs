@@ -20,9 +20,10 @@ module Hledger.Cli.Commands.Accounts (
  ,accounts
 ) where
 
+import Control.Monad (forM_)
 import Data.List
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
 import System.Console.CmdArgs.Explicit as C
 
 import Hledger
@@ -32,54 +33,107 @@ import Hledger.Cli.CliOptions
 -- | Command line options for this command.
 accountsmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Accounts.txt")
-  ([flagNone ["declared"] (setboolopt "declared") "show account names declared with account directives"
-  ,flagNone ["used"] (setboolopt "used") "show account names referenced by transactions"
+  (
+  [flagNone ["used","u"]     (setboolopt "used")       "list accounts used"
+  ,flagNone ["declared","d"] (setboolopt "declared")   "list accounts declared"
+  ,flagNone ["undeclared"]   (setboolopt "undeclared") "list accounts used but not declared"
+  ,flagNone ["unused"]       (setboolopt "unused")     "list accounts declared but not used"
+  ,flagNone ["find"]         (setboolopt "find")       "list the first account matched by the first argument (a case-insensitive infix regexp)"
+  ,flagNone ["directives"]   (setboolopt "directives") "show as account directives, for use in journals"
+  ,flagNone ["locations"]    (setboolopt "locations")  "also show where accounts were declared"
+  ,flagNone ["types"]        (setboolopt "types")      "also show account types when known"
   ]
   ++ flattreeflags False ++
-  [flagReq  ["drop"] (\s opts -> Right $ setopt "drop" s opts) "N" "flat mode: omit N leading account name parts"
+  [flagReq  ["drop"] (\s opts -> Right $ setopt "drop" s opts) "N" "flat mode: omit N leading account name parts"]
+  )
+  cligeneralflagsgroups1
+  (hiddenflags ++
+  [flagNone ["positions"]    (setboolopt "locations") "deprecated, use --locations instead"
   ])
-  [generalflagsgroup1]
-  hiddenflags
-  ([], Just $ argsFlag "[QUERY]")
+  ([], Just $ argsFlag "[QUERY..]")
 
 -- | The accounts command.
 accounts :: CliOpts -> Journal -> IO ()
-accounts CliOpts{rawopts_=rawopts, reportspec_=ReportSpec{_rsQuery=query,_rsReportOpts=ropts}} j = do
+accounts opts@CliOpts{rawopts_=rawopts, reportspec_=ReportSpec{_rsQuery=query,_rsReportOpts=ropts}} j = do
 
   -- 1. identify the accounts we'll show
   let tree     = tree_ ropts
-      declared = boolopt "declared" rawopts
-      used     = boolopt "used"     rawopts
+      directives = boolopt "directives" rawopts
+      locations = boolopt "locations" rawopts
+      types = boolopt "types" rawopts
+      -- Modified queries. These may not work with boolean queries (#2371).
       -- a depth limit will clip and exclude account names later, but we don't want to exclude accounts at this stage
-      nodepthq = dbg1 "nodepthq" $ filterQuery (not . queryIsDepth) query
+      nodepthq = dbg4 "nodepthq" $ filterQuery (not . queryIsDepth) query
       -- just the acct: part of the query will be reapplied later, after clipping
-      acctq    = dbg1 "acctq" $ filterQuery queryIsAcct query
-      depth    = dbg1 "depth" $ queryDepth $ filterQuery queryIsDepth query
-      matcheddeclaredaccts = dbg1 "matcheddeclaredaccts" $ filter (matchesAccount nodepthq) $ map fst $ jdeclaredaccounts j
-      matchedusedaccts     = dbg5 "matchedusedaccts" $ map paccount $ journalPostings $ filterJournalPostings nodepthq j
-      accts                = dbg5 "accts to show" $ -- no need to nub/sort, accountTree will
-        if | declared     && not used -> matcheddeclaredaccts
-           | not declared && used     -> matchedusedaccts
-           | otherwise                -> matcheddeclaredaccts ++ matchedusedaccts
+      acctq = dbg4 "acctq" $ filterQuery queryIsAcct query
+      dep = dbg4 "depth" $ queryDepth $ filterQuery queryIsDepth query
+      -- when finding accounts used by postings, we remove tags that were declared on the posting,
+      -- so that a tag: query will match account tags and not posting tags.
+      matchedused = dbg5 "matchedused" $ nub $ map paccount $ journalPostings $
+        filterJournalPostings nodepthq $ journalPostingsKeepAccountTagsOnly j
+      matcheddeclared = dbg5 "matcheddeclared" $
+        nub $
+        filter (matchesAccountExtra (journalAccountType j) (journalInheritedAccountTags j) nodepthq) $
+        map fst $ jdeclaredaccounts j
+      matchedundeclared = dbg5 "matchedundeclared" $ nub $ matchedused \\ matcheddeclared
+      matchedunused = dbg5 "matchedunused" $ nub $ matcheddeclared \\ matchedused
+      found = dbg5 "matchedacct" $ findMatchedByArgument rawopts "account" $ journalAccountNamesDeclaredOrImplied j
+      matchedall = matcheddeclared ++ matchedused
+      accts = dbg5 "accts to show" $
+        case declarablesSelectorFromOpts opts of
+          Nothing         -> matchedall
+          Just Used       -> matchedused
+          Just Declared   -> matcheddeclared
+          Just Undeclared -> matchedundeclared
+          Just Unused     -> matchedunused
+          Just Find       -> [found]
 
-  -- 2. sort them by declaration order and name, at each level of their tree structure
+  -- 2. sort them by declaration order (then undeclared accounts alphabetically)
+  -- within each group of siblings
       sortedaccts = sortAccountNamesByDeclaration j tree accts
+
+  -- 2a. in tree mode, add parent accounts for tree structure context
+      acctswithparents =
+        if tree
+        then dbg4 "acctswithparents" $
+             sortAccountNamesByDeclaration j tree $  -- re-sort after adding parents
+             expandAccountNames sortedaccts          -- add all parent accounts
+        else sortedaccts
 
   -- 3. if there's a depth limit, depth-clip and remove any no longer useful items
       clippedaccts =
-        dbg1 "clippedaccts" $
-        filter (matchesAccount acctq) $           -- clipping can leave accounts that no longer match the query, remove such
-        nub $                                     -- clipping can leave duplicates (adjacent, hopefully)
-        filter (not . T.null) $                   -- depth:0 can leave nulls
-        map (clipAccountName depth) $  -- clip at depth if specified
-        sortedaccts
+        dbg4 "clippedaccts" $
+        (if tree then id else filter (matchesAccount acctq)) $  -- in tree mode, keep parent accounts even if they don't match
+        nub $                            -- clipping can leave duplicates (adjacent, hopefully)
+        filter (not . T.null) $          -- depth:0 can leave nulls
+        map (clipAccountName dep) $      -- clip at depth if specified
+        acctswithparents                 -- use expanded list instead of sortedaccts
 
-  -- 4. print what remains as a list or tree, maybe applying --drop in the former case
-  mapM_ (T.putStrLn . render) clippedaccts
-    where
-      render a = case accountlistmode_ ropts of
-          ALTree -> T.replicate indent " " <> accountLeafName droppedName
-          ALFlat -> droppedName
-        where
-          indent = 2 * (max 0 (accountNameLevel a - drop_ ropts) - 1)
-          droppedName = accountNameDrop (drop_ ropts) a
+  -- 4. print what remains as a list or tree, maybe applying --drop in the former case.
+  -- Add various bits of info if enabled.
+  let
+    showKeyword = if directives then "account " else ""
+    -- some contortions here to show types nicely aligned
+    showName a = case accountlistmode_ ropts of
+      ALTree -> indent <> accountLeafName droppedName
+      ALFlat -> droppedName
+      where
+        indent      = T.replicate (2 * (max 0 (accountNameLevel a - drop_ ropts) - 1)) " "
+        droppedName = accountNameDrop (drop_ ropts) a
+    showType a =
+      case (types, journalAccountType j a) of
+        (True, Just t) -> pad a <> "    ; type: " <> T.pack (show t)
+        _ -> ""
+    showAcctDeclOrder a
+      | locations =
+        (if types then "," else pad a <> "    ;") <>
+        case lookup a $ jdeclaredaccounts j of
+          Just adi ->
+            " declared at " <> (T.pack $ sourcePosPretty $ adisourcepos adi) <>  -- TODO: hide the column number
+            ", overall declaration order " <> (T.pack $ show $ adideclarationorder adi)
+          Nothing -> " undeclared"
+      | otherwise = ""
+    pad a = T.replicate (maxwidth - T.length (showName a)) " "
+    maxwidth = maximum $ map (T.length . showName) clippedaccts
+
+  forM_ clippedaccts $ \a -> T.putStrLn $ showKeyword <> showName a <> showType a <> showAcctDeclOrder a

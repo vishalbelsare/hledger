@@ -1,140 +1,99 @@
-Shell completion for CLI
-========================
+# hledger shell completions
 
-This code generates shell completion scripts for hledger's command line
-interface.
-Shell completion is usually triggered by pressing the tab key once or twice
-after typing the command `hledger `.
-(The exact behavior may differ in shells other than Bash.)
+This code generates shell completion scripts for hledger's command line interface.
+Context-sensitive completions are usually triggered by pressing the tab key once or twice after typing the command `hledger ` (or `hledger-ui` or `hledger-web`).
 
-Currently, only Bash is supported but Zsh or Fish can be added.
+## bash completions
+
+An old demo:
 
 [![asciicast](https://asciinema.org/a/227935.svg)](https://asciinema.org/a/227935)
 
-The completions can handle hledger's CLI:
+To use hledger's bash shell completions, these must be installed on your system:
+- bash
+- the [bash-completion](https://salsa.debian.org/debian/bash-completion) package
+- hledger's bash completion script
+- hledger, hledger-ui, and/or hledger-web
 
-- commands and generic options
-- command-specific options
-- most option arguments
-- account names, tags, payees, etc. from journal files
-- query filter keywords like `status:`, `tag:`, or `amt:`
+For latest user setup instructions and feature list, please see [Install > Shell completions](https://hledger.org/install.html#shell-completions).
 
-Installation for end users
---------------------------
+### Generating the bash completions
 
-Completions are currently only implemented for the Bash shell.
+In the main hledger repo,
+first build and install an up-to-date version of hledger in PATH,
+then run make to detect its commands and options and generate the `hledger-completion.bash` script.
+GNU make and GNU m4 are required.
 
-Please check first if the completions for hledger are already installed on your
-distribution. Refer to the last paragraph of this section for how to test that.
+    stack install hledger
+    cd hledger/shell-completion
+    make
 
-To install from the repository, do:
+This is normally done at release time.
+The makefile runs `hledger`, `hledger -h`, and `hledger CMD -h` for each command,
+to detect (built-in) command names, flag names and flag values,
+and it combines these with a stub script to form the final completion script.
+You can add `-jNUMPROCS` to make it run faster.
 
-```sh
-cd /path-to-repo/shell-completion
-make install
-```
+Data from the journal (account names, payee names etc.) is not gathered here;
+the script detects those dynamically at completion time.
 
-Completions installed this way will be loaded dynamically after you use the hledger
-command. Upon the first invocation of a command that has no predefined completion
-bash looks for a file with the same name in a set of predefined locations in this order:
+### Installing the bash completions
 
-- `$BASH_COMPLETION_USER_DIR/completions`
-- `$XDG_DATA_HOME/bash-completion/completions`
-- `$HOME/.local/share/bash-completion/completions`
-- etc.
+(If you want a released version of the completion script, use the Install page link above instead.)
 
-You can manually achieve the effects of `make install` by copying
-`shell-completion/hledger-completion.bash` to one of the above, and renaming it
-to `hledger`, `_hledger` or `hledger.bash`. For the gory details, type this in a
-bash shell:
+To install the dev completion script, also regenerating it if needed:
 
-```sh
-type __load_completion
-```
+    make install
 
-To install the completions manually, you can also just download and copy
-`shell-completion/hledger-completion.bash` to a directory of your choosing, and
-source it from your shell start up files. This way completions are loaded
-eagerly and that adds a delay to shell start up time.
+This will copy `hledger-completion.bash` to `$XDG_DATA_HOME/bash-completion/completions/hledger`.
+(See bash-completion's docs for other places you can install the script if needed.)
+bash will use it when completing command lines beginning with "hledger" or "hledger-ui" or "hledger-web".
 
-Example:
+You can also just source the script it in your shell startup; this will load completions eagerly, adding a delay to your shell start up time.
+Or you can source it in your current bash session for testing.
 
-```sh
-cp hledger-completion.bash ~/.bash_completion.d/hledger
-echo 'source ~/.bash_completion.d/hledger' >> ~/.bashrc
-# Restart shell
-exec bash
-# Confirm that completion is loaded
-complete -p hledger
-```
+### Packaging the bash completions
 
-Now, try it by typing `hledger` (with a space after the command) and press the
-tab key twice. You should see a list of appropriate completions for hledger.
-Then you can type a part of one of the suggestions and press tab again to
-complete it.
+The `hledger-completion.bash` script is available in the `hledger` package tarball on Hackage,
+and on Github in the release bindists or at
+`https://github.com/simonmichael/hledger/blob/TAG/hledger/shell-completion/hledger-completion.bash`.
+(Eg: https://github.com/simonmichael/hledger/blob/1.43/hledger/shell-completion/hledger-completion.bash)
 
-Background
-----------
+After it has been loaded, this script will provide completions for hledger, hledger-ui and hledger-web.
+Note if it is installed only as `hledger`, bash-completion will not load it until the user types `hledger<SPACE><TAB>`.
+Consider also symbolic-linking it as `hledger-ui` and `hledger-web`, so that `hledger-ui<SPACE><TAB>` and `hledger-web<SPACE><TAB>` will also load it.
 
-The Bash completion script is generated (GNU make) by parsing output of `hledger`,
-`hledger -h`, and `hledger <cmd> -h`. The script also uses `hledger accounts` for
-account name completion. I propose that the Makefile is not run at every built
-but rather manually when the CLI changes.
+hledger bash completions packaging status as of 1.40:
 
-Information for developers
---------------------------
+- Homebrew: includes slightly stale completions, installed as `hledger` only
+- Arch Linux AUR: packaging in progress
+- Others: unknown
 
-Generate the completion script for Bash:
+## zsh completions
 
-```sh
-# change into this folder:
-cd shell-completion/
-make
-```
+hledger completions are shipped with zsh: <https://github.com/zsh-users/zsh-completions/blob/master/src/_hledger>.
+They may be out of date, please help by updating them.
 
-Hint: GNU make and  GNU m4 must be installed to call `make`.
-These are present on most systems anyway.
-Additionally the build will run a lot faster with parallell jobs.
-Use `make -j$(nproc)` for best effect.
+## fish completions
 
-The generated completion script must be installed. The package maintainer for
-your distribution should be responsible for this.
+hledger completions are shipped with fish: <https://github.com/fish-shell/fish-shell/blob/master/share/completions/hledger.fish>
+They may be out of date, please help by updating them.
 
-For now, or to live-test the script, you can use these two commands:
+## Creating/updating completion scripts
 
-```sh
-ln -s hledger-completion.bash ~/.hledger-completion.bash
-echo 'source ~/.hledger-completion.bash' >> ~/.bashrc
-```
+A rough guide:
 
-After that, you have to start a new Bash, e.g. by typing `bash` on the current
-shell.
+1. Create an m4 template for your completion script, eg `hledger-completion.SHELL.m4` where SHELL is the name of the shell.
 
-Now, try it by typing `hledger` (with a space after the command) and press the
-tab key twice. You know how completions work – if not, see above in the
-Installation section.
+2. Add a rule in `Makefile` to transform this to `hledger-completion.SHELL`.
 
-Completion scripts for other shells (e.g. Fish or Zsh)
-------------------------------------------------------
+3. The current hledger commands, options and command options are listed in
+   `commands.txt`, `generic-options.txt`, and `options-*.txt`, generated by the Makefile.
+   Use m4 to include these options and commands into `hledger-completion.SHELL.m4`.
+   See `hledger-completion.bash.m4` as an example.
 
-You're welcome to add completion scripts for other shells. It should not be too
-hard! All available hledger options and commands are already there (generated by
-the Makefile).
+4. Use `make` and then `make hledger-completion.SHELL` to generate and test the completion script.
 
-The generated text files with options and commands are: `commands.txt`,
-`generic-options.txt`, and `options-*.txt` where `*` is the subcommand.
-
-Instructions to add support for another shell:
-
-1. Create e.g. `hledger-completion.fish.m4` as a template file.
-
-2. Add a Make rule to transform it to `hledger-completion.fish`.
-
-3. Use m4 commands to include hledger options and commands into your script
-   template. See `hledger-completion.bash.m4` as a reference.
-
-4. Use `make` and then `make hledger-completion.fish` to create and test the
-   completion script.
-
-5. Finally, if everything is working, also add the generated artifact
-   `hledger-completion.fish` to the repo so that people can use it directly.
+5. Then: add the generated script `hledger-completion.SHELL` to the upstream shell repo, so that it will be easily available to users.
+   If that's not possible, add it here for now.
+   And if you can, please help to keep it up to date with new hledger releases.

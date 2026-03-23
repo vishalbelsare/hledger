@@ -27,11 +27,11 @@ module Text.Tabular.AsciiWide
 import Data.Bifunctor (bimap)
 import Data.Maybe (fromMaybe)
 import Data.Default (Default(..))
-import Data.List (intercalate, intersperse, transpose)
+import Data.List (intersperse, transpose)
 import Data.Semigroup (stimesMonoid)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
+import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Builder (Builder, fromString, fromText, singleton, toLazyText)
 import Safe (maximumMay)
 import Text.Tabular
@@ -75,12 +75,13 @@ cellWidth (Cell _ xs) = fromMaybe 0 . maximumMay $ map wbWidth xs
 
 
 -- | Render a table according to common options, for backwards compatibility
-render :: Bool -> (rh -> Text) -> (ch -> Text) -> (a -> Text) -> Table rh ch a -> TL.Text
+render :: Show a => Bool -> (rh -> Text) -> (ch -> Text) -> (a -> Text) -> Table rh ch a -> TL.Text
 render pretty fr fc f = renderTable def{prettyTable=pretty} (cell . fr) (cell . fc) (cell . f)
   where cell = textCell TopRight
 
 -- | Render a table according to various cell specifications>
-renderTable :: TableOpts       -- ^ Options controlling Table rendering
+renderTable :: Show a =>
+               TableOpts       -- ^ Options controlling Table rendering
             -> (rh -> Cell)  -- ^ Rendering function for row headers
             -> (ch -> Cell)  -- ^ Rendering function for column headers
             -> (a -> Cell)   -- ^ Function determining the string and width of a cell
@@ -89,7 +90,8 @@ renderTable :: TableOpts       -- ^ Options controlling Table rendering
 renderTable topts fr fc f = toLazyText . renderTableB topts fr fc f
 
 -- | A version of renderTable which returns the underlying Builder.
-renderTableB :: TableOpts       -- ^ Options controlling Table rendering
+renderTableB :: Show a =>
+                TableOpts       -- ^ Options controlling Table rendering
              -> (rh -> Cell)  -- ^ Rendering function for row headers
              -> (ch -> Cell)  -- ^ Rendering function for column headers
              -> (a -> Cell)   -- ^ Function determining the string and width of a cell
@@ -99,7 +101,8 @@ renderTableB topts fr fc f = renderTableByRowsB topts (fmap fc) $ bimap fr (fmap
 
 -- | A version of renderTable that operates on rows (including the 'row' of
 -- column headers) and returns the underlying Builder.
-renderTableByRowsB :: TableOpts      -- ^ Options controlling Table rendering
+renderTableByRowsB :: Show a =>
+                TableOpts      -- ^ Options controlling Table rendering
              -> ([ch] -> [Cell])     -- ^ Rendering function for column headers
              -> ((rh, [a]) -> (Cell, [Cell])) -- ^ Rendering function for row and row header
              -> Table rh ch a
@@ -127,9 +130,9 @@ renderTableByRowsB topts@TableOpts{prettyTable=pretty, tableBorders=borders} fc 
 
   -- maximum width for each column
   sizes = map (fromMaybe 0 . maximumMay . map cellWidth) $ transpose cells2
-  renderRs (Header s)   = [s]
-  renderRs (Group p hs) = intercalate sep $ map renderRs hs
-    where sep = renderHLine VM borders pretty sizes ch2 p
+  renderRs =
+    concatMap (either (renderHLine VM borders pretty sizes ch2) (:[])) .
+    flattenHeader
 
   -- borders and bars
   addBorders xs = if borders then bar VT SingleLine : xs ++ [bar VB SingleLine] else xs
@@ -142,9 +145,7 @@ renderRow topts = toLazyText . renderRowB topts
 
 -- | A version of renderRow which returns the underlying Builder.
 renderRowB:: TableOpts -> Header Cell -> Builder
-renderRowB topts h = renderColumns topts is h
-  where is = map cellWidth $ headerContents h
-
+renderRowB topts h = renderColumns topts ws h where ws = map cellWidth $ headerContents h
 
 verticalBar :: Bool -> Char
 verticalBar pretty = if pretty then '│' else '|'
@@ -211,11 +212,11 @@ renderHLine _ _ _ _ _ NoLine = []
 renderHLine vpos borders pretty w h prop = [renderHLine' vpos borders pretty prop w h]
 
 renderHLine' :: VPos -> Bool -> Bool -> Properties -> [Int] -> Header a -> Builder
-renderHLine' vpos borders pretty prop is h = addBorders $ sep <> coreLine <> sep
+renderHLine' vpos borders pretty prop is hdr = addBorders $ sep <> coreLine <> sep
  where
   addBorders xs   = if borders then edge HL <> xs <> edge HR else xs
   edge hpos       = boxchar vpos hpos SingleLine prop pretty
-  coreLine        = foldMap helper $ flattenHeader $ zipHeader 0 is h
+  coreLine        = foldMap helper $ flattenHeader $ zipHeader 0 is hdr
   helper          = either vsep dashes
   dashes (i,_)    = stimesMonoid i sep
   sep             = boxchar vpos HM NoLine prop pretty

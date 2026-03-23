@@ -29,17 +29,23 @@ data InputOpts = InputOpts {
                                                 --   by a filename prefix. Nothing means try all.
     ,mrules_file_       :: Maybe FilePath       -- ^ a conversion rules file to use (when reading CSV)
     ,aliases_           :: [String]             -- ^ account name aliases to apply
-    ,anon_              :: Bool                 -- ^ do light anonymisation/obfuscation of the data
-    ,new_               :: Bool                 -- ^ read only new transactions since this file was last read
-    ,new_save_          :: Bool                 -- ^ save latest new transactions state for next time
+    ,anon_              :: Bool                 -- ^ do light obfuscation of the data ? Now corresponds to --obfuscate, not the old --anon flag.
+    ,new_               :: Bool                 -- ^ read only new transactions since this file was last read ?
+    ,new_save_          :: Bool                 -- ^ save latest new transactions state for next time ?
     ,pivot_             :: String               -- ^ use the given field's value as the account name
     ,forecast_          :: Maybe DateSpan       -- ^ span in which to generate forecast transactions
+    ,auto_posting_tags_ :: Bool                 -- ^ propagate commodity and account tags to postings ? Can be disabled (for beancount export).
+    ,verbose_tags_      :: Bool                 -- ^ add user-visible tags when generating/modifying transactions & postings ?
     ,reportspan_        :: DateSpan             -- ^ a dirty hack keeping the query dates in InputOpts. This rightfully lives in ReportSpec, but is duplicated here.
-    ,auto_              :: Bool                 -- ^ generate automatic postings when journal is parsed
-    ,balancingopts_     :: BalancingOpts        -- ^ options for balancing transactions
-    ,strict_            :: Bool                 -- ^ do extra error checking (eg, all posted accounts are declared, no prices are inferred)
+    ,auto_              :: Bool                 -- ^ generate extra postings according to auto posting rules ?
+    ,infer_equity_      :: Bool                 -- ^ infer equity conversion postings from costs ?
+    ,infer_costs_       :: Bool                 -- ^ infer costs from equity conversion postings ? distinct from BalancingOpts{infer_balancing_costs_}
+    ,balancingopts_     :: BalancingOpts        -- ^ options for transaction balancing
+    ,strict_            :: Bool                 -- ^ do extra correctness checks ?
+    ,_defer             :: Bool                 -- ^ internal flag: postpone checks, because we are processing multiple files ?
     ,_ioDay             :: Day                  -- ^ today's date, for use with forecast transactions  XXX this duplicates _rsDay, and should eventually be removed when it's not needed anymore.
- } deriving (Show)
+    ,_oldtimeclock      :: Bool                 -- ^ parse with the old timeclock pairing rules?
+ } deriving (Eq, Ord, Show)
 
 definputopts :: InputOpts
 definputopts = InputOpts
@@ -51,11 +57,17 @@ definputopts = InputOpts
     , new_save_          = True
     , pivot_             = ""
     , forecast_          = Nothing
+    , auto_posting_tags_ = False
+    , verbose_tags_      = False
     , reportspan_        = nulldatespan
     , auto_              = False
+    , infer_equity_      = False
+    , infer_costs_       = False
     , balancingopts_     = defbalancingopts
     , strict_            = False
+    , _defer             = False
     , _ioDay             = nulldate
+    , _oldtimeclock      = False
     }
 
 -- | Get the Maybe the DateSpan to generate forecast options from.
@@ -72,11 +84,11 @@ definputopts = InputOpts
 forecastPeriod :: InputOpts -> Journal -> Maybe DateSpan
 forecastPeriod iopts j = do
     DateSpan requestedStart requestedEnd <- forecast_ iopts
-    let forecastStart = requestedStart <|> max mjournalend reportStart <|> Just (_ioDay iopts)
-        forecastEnd   = requestedEnd <|> reportEnd <|> Just (addDays 180 $ _ioDay iopts)
+    let forecastStart = fromEFDay <$> requestedStart <|> max mjournalend (fromEFDay <$> reportStart) <|> Just (_ioDay iopts)
+        forecastEnd   = fromEFDay <$> requestedEnd <|> fromEFDay <$> reportEnd <|> (Just $ addDays 180 $ _ioDay iopts)
         mjournalend   = dbg2 "journalEndDate" $ journalEndDate False j  -- ignore secondary dates
         DateSpan reportStart reportEnd = reportspan_ iopts
-    return . dbg2 "forecastspan" $ DateSpan forecastStart forecastEnd
+    return . dbg2 "forecastspan" $ DateSpan (Exact <$> forecastStart) (Exact <$> forecastEnd)
 
 -- ** Lenses
 

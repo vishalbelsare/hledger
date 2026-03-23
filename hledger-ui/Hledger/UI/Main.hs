@@ -1,38 +1,70 @@
 {-|
-hledger-ui - a hledger add-on providing a curses-style interface.
-Copyright (c) 2007-2015 Simon Michael <simon@joyful.com>
-Released under GPL version 3 or later.
+hledger-ui - a hledger add-on providing an efficient TUI.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+Copyright (c) 2007-2025 (each year in this range) Simon Michael <simon@joyful.com> and contributors.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+You should have received a copy of the GNU General Public License along with this program.
+If not, see <https://www.gnu.org/licenses/>.
+
 -}
+
+{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Hledger.UI.Main where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
+#if MIN_VERSION_base(4,20,0)
+import Control.Exception.Backtrace (setBacktraceMechanismState, BacktraceMechanism(..))
+#endif
 import Control.Monad (forM_, void, when)
+import Data.Bifunctor (first)
+import Data.Function ((&))
 import Data.List (find)
 import Data.List.Extra (nubSort)
 import Data.Maybe (fromMaybe)
-import qualified Data.Text as T
-import Graphics.Vty (mkVty, Mode (Mouse), Vty (outputIface), Output (setMode))
+import Data.Text qualified as T
+import Graphics.Vty (Mode (Mouse), Vty (outputIface), Output (setMode))
+import Graphics.Vty.CrossPlatform (mkVty)
 import Lens.Micro ((^.))
 import System.Directory (canonicalizePath)
+import System.Environment (withProgName)
 import System.FilePath (takeDirectory)
-import System.FSNotify (Event(Modified), isPollingManager, watchDir, withManager)
-import Brick
-
-import qualified Brick.BChan as BC
+import System.FSNotify (Event(Added, Modified), watchDir, withManager, EventIsDirectory (IsFile))
+import Brick hiding (bsDraw)
+import Brick.BChan qualified as BC
 
 import Hledger
 import Hledger.Cli hiding (progname,prognameandversion)
+import Hledger.UI.Theme
 import Hledger.UI.UIOptions
 import Hledger.UI.UITypes
-import Hledger.UI.Theme
+import Hledger.UI.UIState (uiState, getDepth)
+import Hledger.UI.UIUtils (dbguiEv, showScreenStack, showScreenSelection)
+import Hledger.UI.MenuScreen
 import Hledger.UI.AccountsScreen
+import Hledger.UI.CashScreen
+import Hledger.UI.BalancesheetScreen
+import Hledger.UI.IncomestatementScreen
 import Hledger.UI.RegisterScreen
+import Hledger.UI.TransactionScreen
+import Hledger.UI.ErrorScreen
+import Hledger.UI.UIScreens
+
 
 ----------------------------------------------------------------------
 
@@ -43,24 +75,54 @@ writeChan :: BC.BChan a -> a -> IO ()
 writeChan = BC.writeBChan
 
 
-main :: IO ()
-main = do
-  opts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=iopts,rawopts_=rawopts}} <- getHledgerUIOpts
+hledgerUiMain :: IO ()
+hledgerUiMain = handleExit $ withGhcDebug' $ withProgName "hledger-ui.log" $ do  -- force Hledger.Utils.Debug.* to log to hledger-ui.log
+  when (ghcDebugMode == GDPauseAtStart) $ ghcDebugPause'
+
+#if MIN_VERSION_base(4,20,0)
+  -- Control ghc 9.10+'s stack traces.
+  -- CostCentreBacktrace   - collect cost-centre stack backtraces (only available when built with profiling)
+  -- HasCallStackBacktrace - collect HasCallStack backtraces
+  -- ExecutionBacktrace    - collect backtraces from native execution stack unwinding
+  -- IPEBacktrace          - collect backtraces from Info Table Provenance Entries
+#ifdef DEBUG
+  setBacktraceMechanismState HasCallStackBacktrace True
+#else
+  setBacktraceMechanismState HasCallStackBacktrace False
+#endif
+#endif
+
+  dbg1MsgIO "\n\n\n\n==== hledger-ui start"
+  dbg1IO "args" progArgs
+  dbg1IO "debugLevel" debugLevel
+
+  opts1@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=iopts,rawopts_=rawopts}} <- getHledgerUIOpts
   -- when (debug_ $ cliopts_ opts) $ printf "%s\n" prognameandversion >> printf "opts: %s\n" (show opts)
+
+  usecolor <- useColorOnStdout
+  -- And when it's not, disable colour in the TUI ?
+  -- Theme.hs's themes currently hard code various colours and styles provided by vty,
+  -- which probably are disabled automatically when terminal doesn't support them.
+  -- But we'll at least force hledger-ui's theme to a monochrome one.
+  let opts = if usecolor then opts1 else opts1{uoTheme=Just "terminal"}
 
   -- always generate forecasted periodic transactions; their visibility will be toggled by the UI.
   let copts' = copts{inputopts_=iopts{forecast_=forecast_ iopts <|> Just nulldatespan}}
 
   case True of
-    _ | "help"            `inRawOpts` rawopts -> putStr (showModeUsage uimode)
-    _ | "info"            `inRawOpts` rawopts -> runInfoForTopic "hledger-ui" Nothing
-    _ | "man"             `inRawOpts` rawopts -> runManForTopic  "hledger-ui" Nothing
-    _ | "version"         `inRawOpts` rawopts -> putStrLn prognameandversion
-    -- _ | "binary-filename" `inRawOpts` rawopts -> putStrLn (binaryfilename progname)
-    _                                         -> withJournalDo copts' (runBrickUi opts)
+    _ | boolopt "help"    rawopts -> runPager $ showModeUsage uimode ++ "\n"
+    _ | boolopt "tldr"    rawopts -> runTldrForPage "hledger-ui"
+    _ | boolopt "info"    rawopts -> runInfoForTopic "hledger-ui" Nothing
+    _ | boolopt "man"     rawopts -> runManForTopic  "hledger-ui" Nothing
+    _ | boolopt "version" rawopts -> putStrLn prognameandversion
+    -- _ | boolopt "binary-filename" rawopts -> putStrLn (binaryfilename progname)
+    _                                         -> withJournal copts' (runBrickUi opts)
+
+  when (ghcDebugMode == GDPauseAtEnd) $ ghcDebugPause'
 
 runBrickUi :: UIOpts -> Journal -> IO ()
-runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rspec@ReportSpec{_rsReportOpts=ropts}}} j = do
+runBrickUi uopts0@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rspec@ReportSpec{_rsReportOpts=ropts}}} j =
+  do
   let
     today = copts^.rsDay
 
@@ -101,15 +163,16 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
     -- There is also a freeform text area for extra query terms (/ key).
     -- It's cleaner and less conflicting to keep the former out of the latter.
 
-    uopts' = uopts{
+    uopts = uopts0{
       uoCliOpts=copts{
          reportspec_=rspec{
             _rsQuery=filteredQuery $ _rsQuery rspec,  -- query with depth/date parts removed
             _rsReportOpts=ropts{
-               depth_ =queryDepth $ _rsQuery rspec,  -- query's depth part
-               period_=periodfromoptsandargs,       -- query's date part
-               no_elide_=True,  -- avoid squashing boring account names, for a more regular tree (unlike hledger)
-               empty_=not $ empty_ ropts  -- show zero items by default, hide them with -E (unlike hledger)
+               depth_    = queryDepth $ _rsQuery rspec,  -- query's depth part
+               period_   = periodfromoptsandargs,       -- query's date part
+               no_elide_ = True,  -- avoid squashing boring account names, for a more regular tree (unlike hledger)
+               empty_    = not $ empty_ ropts,  -- show zero items by default, hide them with -E (unlike hledger)
+               declared_ = True  -- always show declared accounts even if unused
                }
             }
          }
@@ -121,50 +184,70 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
         filteredQuery q = simplifyQuery $ And [queryFromFlags ropts, filtered q]
           where filtered = filterQuery (\x -> not $ queryIsDepth x || queryIsDate x)
 
-    (scr, prevscrs) = case uoRegister uopts' of
-      Nothing   -> (accountsScreen, [])
-      -- with --register, start on the register screen, and also put
-      -- the accounts screen on the prev screens stack so you can exit
-      -- to that as usual.
-      Just apat -> (rsSetAccount acct False registerScreen, [ascr'])
+    -- Choose the initial screen to display.
+    -- We also set up a stack of previous screens, as if you had navigated down to it from the top.
+    -- Note the previous screens list is ordered nearest-first, with the top-most (menu) screen last.
+    -- Keep all of this synced with msNew.
+    rawopts = rawopts_ $ uoCliOpts $ uopts
+    (prevscrs, currscr) =
+      dbg1With (showScreenStack "initial" showScreenSelection . uncurry2 (uiState defuiopts nulljournal)) $
+      if
+        -- An accounts screen is specified. Its previous screen will be the menu screen with it selected.
+        | boolopt "cash" rawopts -> ([msSetSelectedScreen csItemIndex menuscr], csacctsscr)
+        | boolopt "bs"   rawopts -> ([msSetSelectedScreen bsItemIndex menuscr], bsacctsscr)
+        | boolopt "is"   rawopts -> ([msSetSelectedScreen isItemIndex menuscr], isacctsscr)
+        | boolopt "all"  rawopts -> ([msSetSelectedScreen asItemIndex menuscr], allacctsscr)
+
+        -- A register screen is specified with --register=ACCT. The initial screen stack will be:
+        --
+        --   menu screen, with ACCTSSCR selected
+        --    ACCTSSCR (the accounts screen containing ACCT), with ACCT selected
+        --     register screen for ACCT
+        --
+        | Just apat <- uoRegister uopts ->
+          let
+            -- the account being requested
+            acct = fromMaybe (error' $ "--register "++apat++" did not match any account")  -- PARTIAL:
+              . firstMatch $ journalAccountNamesDeclaredOrImplied j
+              where
+                firstMatch = case toRegexCI $ T.pack apat of
+                    Right re -> find (regexMatchText re)
+                    Left  _  -> const Nothing
+
+            -- the register screen for acct
+            regscr = 
+              rsSetAccount acct False $
+              rsNew uopts today j acct forceinclusive
+                where
+                  forceinclusive = case getDepth ui of
+                                    Just de -> accountNameLevel acct >= de
+                                    Nothing -> False
+
+            -- The accounts screen containing acct.
+            -- Keep these selidx values synced with the menu items in msNew.
+            (acctsscr, selidx) =
+              case journalAccountType j acct of
+                Just t | isBalanceSheetAccountType t    -> (bsacctsscr, 1)
+                Just t | isIncomeStatementAccountType t -> (isacctsscr, 2)
+                _                                       -> (allacctsscr,0)
+              & first (asSetSelectedAccount acct)
+
+            -- the menu screen
+            menuscr' = msSetSelectedScreen selidx menuscr
+          in ([acctsscr, menuscr'], regscr)
+
+        -- Otherwise, start on the menu screen.
+        | otherwise -> ([], menuscr)
+
         where
-          acct = fromMaybe (error' $ "--register "++apat++" did not match any account")  -- PARTIAL:
-                 . firstMatch $ journalAccountNamesDeclaredOrImplied j
-          firstMatch = case toRegexCI $ T.pack apat of
-              Right re -> find (regexMatchText re)
-              Left  _  -> const Nothing
-          -- Initialising the accounts screen is awkward, requiring
-          -- another temporary UIState value..
-          ascr' = aScreen $
-                  asInit today True
-                    UIState{
-                     astartupopts=uopts'
-                    ,aopts=uopts'
-                    ,ajournal=j
-                    ,aScreen=asSetSelectedAccount acct accountsScreen
-                    ,aPrevScreens=[]
-                    ,aMode=Normal
-                    }
+          menuscr     = msNew
+          allacctsscr = asNew uopts today j Nothing
+          csacctsscr  = csNew uopts today j Nothing
+          bsacctsscr  = bsNew uopts today j Nothing
+          isacctsscr  = isNew uopts today j Nothing
 
-    ui =
-      (sInit scr) today True $
-          UIState{
-           astartupopts=uopts'
-          ,aopts=uopts'
-          ,ajournal=j
-          ,aScreen=scr
-          ,aPrevScreens=prevscrs
-          ,aMode=Normal
-          }
-
-    brickapp :: App UIState AppEvent Name
-    brickapp = App {
-        appStartEvent   = return
-      , appAttrMap      = const $ fromMaybe defaultTheme $ getTheme =<< uoTheme uopts'
-      , appChooseCursor = showFirstCursor
-      , appHandleEvent  = \ui ev -> sHandle (aScreen ui) ui ev
-      , appDraw         = \ui    -> sDraw   (aScreen ui) ui
-      }
+    ui = uiState uopts j prevscrs currscr
+    app = brickApp (uoTheme uopts)
 
   -- print (length (show ui)) >> exitSuccess  -- show any debug output to this point & quit
 
@@ -175,10 +258,10 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
       setMode (outputIface v) Mouse True
       return v
 
-  if not (uoWatch uopts')
+  if not (uoWatch uopts)
   then do
     vty <- makevty
-    void $ customMain vty makevty Nothing brickapp ui
+    void $ customMain vty makevty Nothing app ui
 
   else do
     -- a channel for sending misc. events to the app
@@ -210,7 +293,6 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
       -- with Debounce at the default 1ms it clears transient errors itself
       -- but gets tied up for ages
       withManager $ \mgr -> do
-        dbg1IO "fsnotify using polling ?" $ isPollingManager mgr
         files <- mapM (canonicalizePath . fst) $ jfiles j
         let directories = nubSort $ map takeDirectory files
         dbg1IO "files" files
@@ -221,9 +303,8 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
           d
           -- predicate: ignore changes not involving our files
           (\case
-            Modified f _ False -> f `elem` files
-            -- Added    f _ -> f `elem` files
-            -- Removed  f _ -> f `elem` files
+            Added f _ IsFile -> f `elem` files -- for editors which write the whole file from scratch on saves
+            Modified f _ IsFile -> f `elem` files -- for editors which modify existing files in place
             -- we don't handle adding/removing journal files right now
             -- and there might be some of those events from tmp files
             -- clogging things up so let's ignore them
@@ -238,4 +319,39 @@ runBrickUi uopts@UIOpts{uoCliOpts=copts@CliOpts{inputopts_=_iopts,reportspec_=rs
 
         -- and start the app. Must be inside the withManager block. (XXX makevty too ?)
         vty <- makevty
-        void $ customMain vty makevty (Just eventChan) brickapp ui
+        void $ customMain vty makevty (Just eventChan) app ui
+
+brickApp :: Maybe String -> App UIState AppEvent Name
+brickApp mtheme = App {
+    appStartEvent   = return ()
+  , appAttrMap      = const $ fromMaybe defaultTheme $ getTheme =<< mtheme
+  , appChooseCursor = showFirstCursor
+  , appHandleEvent  = uiHandle
+  , appDraw         = uiDraw
+  }
+
+uiHandle :: BrickEvent Name AppEvent -> EventM Name UIState ()
+uiHandle ev = do
+  dbguiEv $ "\n==== " ++ show ev
+  ui <- get
+  case aScreen ui of
+    MS _ -> msHandle ev
+    AS _ -> asHandle ev
+    CS _ -> csHandle ev
+    BS _ -> bsHandle ev
+    IS _ -> isHandle ev
+    RS _ -> rsHandle ev
+    TS _ -> tsHandle ev
+    ES _ -> esHandle ev
+
+uiDraw :: UIState -> [Widget Name]
+uiDraw ui =
+  case aScreen ui of
+    MS _ -> msDraw ui
+    AS _ -> asDraw ui
+    CS _ -> csDraw ui
+    BS _ -> bsDraw ui
+    IS _ -> isDraw ui
+    RS _ -> rsDraw ui
+    TS _ -> tsDraw ui
+    ES _ -> esDraw ui

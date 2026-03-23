@@ -20,27 +20,47 @@ module Hledger.Cli.Commands.Register (
 
 import Data.Default (def)
 import Data.Maybe (fromMaybe, isJust)
-import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.Builder as TB
+import Data.Text (Text)
+import Data.Map qualified as Map
+import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.IO qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Safe (readMay)
 import System.Console.CmdArgs.Explicit (flagNone, flagReq)
 
-import Hledger
-import Hledger.Read.CsvReader (CSV, CsvRecord, printCSV)
+import Hledger hiding (per)
+import Hledger.Write.Csv (CSV, printCSV, printTSV)
+import Hledger.Write.Ods (printFods)
+import Hledger.Write.Html.Lucid (styledTableHtml)
+import Hledger.Write.Spreadsheet qualified as Spr
 import Hledger.Cli.CliOptions
 import Hledger.Cli.Utils
-import Text.Tabular.AsciiWide
+import Hledger.Cli.Anchor (setAccountAnchor, dateCell)
+import Text.Tabular.AsciiWide (Cell(..), Align(..), Properties(..), Header(Header, Group), renderRowB, textCell, tableBorders, borderSpaces)
+import Lucid qualified
+import Data.List (sortBy)
+import Data.Char (toUpper)
+import Data.List.Extra (intersect)
+import System.IO qualified as IO
 
 registermode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Register.txt")
   ([flagNone ["cumulative"] (setboolopt "cumulative")
-     "show running total from report start date (default)"
+     (accumprefix ++ "show running total from report start date (default)")
   ,flagNone ["historical","H"] (setboolopt "historical")
-     "show historical running total/balance (includes postings before report start date)\n "
+     (accumprefix ++ "show historical running total/balance (includes postings before report start date)")
   ,flagNone ["average","A"] (setboolopt "average")
      "show running average of posting amounts instead of total (implies --empty)"
+  ,let arg = "DESC" in
+   flagReq  ["match","m"] (\s opts -> Right $ setopt "match" s opts) arg
+    ("fuzzy search for one recent posting with description closest to "++arg)
   ,flagNone ["related","r"] (setboolopt "related") "show postings' siblings instead"
   ,flagNone ["invert"] (setboolopt "invert") "display all amounts with reversed sign"
+  ,flagReq  ["drop"] (\s opts -> Right $ setopt "drop" s opts) "N" "omit N leading account name parts"
+  ,flagReq  ["sort"] (\s opts -> Right $ setopt "sort" s opts) "FIELDS" 
+    ("sort by: " <> sortKeysDescription
+    <> ", or a comma-separated combination of these. For a descending sort, prefix with -. (Default: date)")
   ,flagReq  ["width","w"] (\s opts -> Right $ setopt "width" s opts) "N"
      ("set output width (default: " ++
 #ifdef mingw32_HOST_OS
@@ -48,57 +68,111 @@ registermode = hledgerCommandMode
 #else
       "terminal width"
 #endif
-      ++ " or $COLUMNS). -wN,M sets description width as well."
+      ++ "). -wN,M sets description width as well."
      )
-  ,outputFormatFlag ["txt","csv","json"]
+  ,flagNone ["align-all"] (setboolopt "align-all") "guarantee alignment across all lines (slower)"
+  ,flagReq  ["base-url"] (\s opts -> Right $ setopt "base-url" s opts) "URLPREFIX" "in html output, generate links to hledger-web, with this prefix. (Usually the base url shown by hledger-web; can also be relative.)"
+  ,outputFormatFlag ["txt","csv","tsv","html","fods","json"]
   ,outputFileFlag
   ])
-  [generalflagsgroup1]
+  cligeneralflagsgroups1
   hiddenflags
   ([], Just $ argsFlag "[QUERY]")
+  where
+    accumprefix = "accumulation mode: "
 
 -- | Print a (posting) register report.
 register :: CliOpts -> Journal -> IO ()
-register opts@CliOpts{reportspec_=rspec} j =
-    writeOutputLazyText opts . render $ postingsReport rspec j
+register opts@CliOpts{rawopts_=rawopts, reportspec_=rspec} j
+  -- match mode, print one recent posting most similar to given description, if any
+  -- XXX should match similarly to print --match
+  | Just desc <- maybestringopt "match" rawopts = do
+      let ps = [p | (_,_,_,p,_) <- rpt]
+      case similarPosting ps desc of
+        Nothing -> error' $ "no postings found with description like " <> show desc
+        Just p  -> TL.putStr $ postingsReportAsText opts [pri]
+                  where pri = (Just (postingDate p)
+                              ,Nothing
+                              ,tdescription <$> ptransaction p
+                              ,styleAmounts styles p
+                              ,styleAmounts styles nullmixedamt)
+  -- normal register report, list postings
+  | otherwise = writeOutputLazyText opts $ render $ styleAmounts styles rpt
   where
-    fmt = outputFormatFromOpts opts
+    styles = journalCommodityStylesWith HardRounding j
+    rpt = postingsReport rspec j
     render | fmt=="txt"  = postingsReportAsText opts
-           | fmt=="csv"  = printCSV . postingsReportAsCsv
            | fmt=="json" = toJsonText
+           | fmt=="csv"  = printCSV . postingsReportAsCsv opts
+           | fmt=="tsv"  = printTSV . postingsReportAsCsv opts
+           | fmt=="html" =
+                (<>"\n") . Lucid.renderText . styledTableHtml .
+                map (map (fmap Lucid.toHtml)) .
+                postingsReportAsSpreadsheet opts oneLineNoCostFmt baseUrl query
+           | fmt=="fods" =
+                printFods IO.localeEncoding . Map.singleton "Register" .
+                (,) (1,0) .
+                postingsReportAsSpreadsheet opts oneLineNoCostFmt baseUrl query
            | otherwise   = error' $ unsupportedOutputFormatError fmt  -- PARTIAL:
+      where fmt = outputFormatFromOpts opts
+            baseUrl = balance_base_url_ $ _rsReportOpts rspec
+            query = querystring_ $ _rsReportOpts rspec
 
-postingsReportAsCsv :: PostingsReport -> CSV
-postingsReportAsCsv is =
-  ["txnidx","date","code","description","account","amount","total"]
+postingsReportAsCsv :: CliOpts -> PostingsReport -> CSV
+postingsReportAsCsv opts =
+  Spr.rawTableContent . postingsReportAsSpreadsheet opts machineFmt Nothing []
+
+-- ToDo: --layout=bare etc.
+-- ToDo: Text output does not show headers, but Spreadsheet does
+postingsReportAsSpreadsheet ::
+  CliOpts -> AmountFormat -> Maybe Text -> [Text] ->
+  PostingsReport -> [[Spr.Cell Spr.NumLines Text]]
+postingsReportAsSpreadsheet opts fmt baseUrl query is =
+  Spr.addHeaderBorders
+    (map Spr.headerCell
+      ["txnidx","date","code","description","account","amount","total"])
   :
-  map postingsReportItemAsCsvRecord is
+  map (postingsReportItemAsRecord opts fmt baseUrl query) is
 
-postingsReportItemAsCsvRecord :: PostingsReportItem -> CsvRecord
-postingsReportItemAsCsvRecord (_, _, _, p, b) = [idx,date,code,desc,acct,amt,bal]
+{- ToDo:
+link txnidx to journal URL,
+   however, requires Web.Widget.Common.transactionFragment
+-}
+postingsReportItemAsRecord ::
+    (Spr.Lines border) =>
+    CliOpts -> AmountFormat -> Maybe Text -> [Text] ->
+    PostingsReportItem -> [Spr.Cell border Text]
+postingsReportItemAsRecord opts@CliOpts{reportspec_=rspec} fmt baseUrl query (_, _, _, p, b) =
+    [idx,
+     (dateCell baseUrl query (paccount p) date) {Spr.cellType = Spr.TypeDate},
+     cell code, cell desc,
+     setAccountAnchor baseUrl query (paccount p) $ cell acct,
+     amountCell (pamount p),
+     amountCell b]
   where
-    idx  = T.pack . show . maybe 0 tindex $ ptransaction p
-    date = showDate $ postingDate p -- XXX csv should show date2 with --date2
+    cell = Spr.defaultCell
+    idx  = Spr.integerCell . maybe 0 tindex $ ptransaction p
+    date = postingDate p -- XXX csv should show date2 with --date2
     code = maybe "" tcode $ ptransaction p
     desc = maybe "" tdescription $ ptransaction p
-    acct = bracket $ paccount p
+    acct = bracket . dropAcct . clipAcct $ paccount p
       where
+        clipAcct = clipOrEllipsifyAccountName (depth_ $ _rsReportOpts rspec)
+        dropAcct = accountNameDrop (fromMaybe 0 $ readMay =<< maybestringopt "drop" (rawopts_ opts))
         bracket = case ptype p of
                              BalancedVirtualPosting -> wrap "[" "]"
                              VirtualPosting -> wrap "(" ")"
                              _ -> id
     -- Since postingsReport strips prices from all Amounts when not used, we can display prices.
-    amt = wbToText . showMixedAmountB oneLine $ pamount p
-    bal = wbToText $ showMixedAmountB oneLine b
+    amountCell amt =
+      wbToText <$> Spr.cellFromMixedAmount fmt (Spr.Class "amount", amt)
 
 -- | Render a register report as plain text suitable for console output.
 postingsReportAsText :: CliOpts -> PostingsReport -> TL.Text
-postingsReportAsText opts items = TB.toLazyText lines
+postingsReportAsText opts = TB.toLazyText .
+    postingsOrTransactionsReportAsText alignAll opts (postingsReportItemAsText opts) itemamt itembal
   where
-    lines = foldMap (postingsReportItemAsText opts amtwidth balwidth) items
-    amtwidth = maximumStrict $ 12 : widths (map itemamt items)
-    balwidth = maximumStrict $ 12 : widths (map itembal items)
-    widths = map wbWidth . concatMap (showMixedAmountLinesB oneLine)
+    alignAll = boolopt "align-all" $ rawopts_ opts
     itemamt (_,_,_,Posting{pamount=a},_) = a
     itembal (_,_,_,_,a) = a
 
@@ -126,8 +200,10 @@ postingsReportAsText opts items = TB.toLazyText lines
 --
 -- Also returns the natural width (without padding) of the amount and balance
 -- fields.
-postingsReportItemAsText :: CliOpts -> Int -> Int -> PostingsReportItem -> TB.Builder
-postingsReportItemAsText opts preferredamtwidth preferredbalwidth (mdate, mperiod, mdesc, p, b) =
+postingsReportItemAsText :: CliOpts -> Int -> Int
+                         -> (PostingsReportItem, [WideBuilder], [WideBuilder])
+                         -> TB.Builder
+postingsReportItemAsText opts@CliOpts{reportspec_=rspec} preferredamtwidth preferredbalwidth ((mdate, mperiod, mdesc, p, _), amt, bal) =
     table <> TB.singleton '\n'
   where
     table = renderRowB def{tableBorders=False, borderSpaces=False} . Group NoLine $ map Header
@@ -143,14 +219,14 @@ postingsReportItemAsText opts preferredamtwidth preferredbalwidth (mdate, mperio
       ]
     spacerCell  = Cell BottomLeft [WideBuilder (TB.singleton ' ') 1]
     spacerCell2 = Cell BottomLeft [WideBuilder (TB.fromString "  ") 2]
-    pad fullwidth amt = WideBuilder (TB.fromText $ T.replicate w " ") w <> amt
-      where w = fullwidth - wbWidth amt
+    pad fullwidth amt' = WideBuilder (TB.fromText $ T.replicate w " ") w <> amt'
+      where w = fullwidth - wbWidth amt'
     -- calculate widths
     (totalwidth,mdescwidth) = registerWidthsFromOpts opts
     datewidth = maybe 10 periodTextWidth mperiod
     date = case mperiod of
-             Just period -> if isJust mdate then showPeriod period else ""
-             Nothing     -> maybe "" showDate mdate
+             Just per -> if isJust mdate then showPeriod per else ""
+             Nothing  -> maybe "" showDate mdate
     (amtwidth, balwidth)
       | shortfall <= 0 = (preferredamtwidth, preferredbalwidth)
       | otherwise      = (adjustedamtwidth, adjustedbalwidth)
@@ -171,15 +247,63 @@ postingsReportItemAsText opts preferredamtwidth preferredbalwidth (mdate, mperio
 
     -- gather content
     desc = fromMaybe "" mdesc
-    acct = parenthesise . elideAccountName awidth $ paccount p
+    acct = parenthesise . elideAccountName awidth . dropAcct . clipAcct $ paccount p
       where
+        clipAcct = clipOrEllipsifyAccountName (depth_ $ _rsReportOpts rspec)
+        dropAcct = accountNameDrop (fromMaybe 0 $ readMay =<< maybestringopt "drop" (rawopts_ opts))
         (parenthesise, awidth) = case ptype p of
             BalancedVirtualPosting -> (wrap "[" "]", acctwidth-2)
             VirtualPosting         -> (wrap "(" ")", acctwidth-2)
             _                      -> (id,acctwidth)
-    amt = showamt $ pamount p
-    bal = showamt b
-    showamt = showMixedAmountLinesB oneLine{displayColour=color_ . _rsReportOpts $ reportspec_ opts}
+
+-- for register --match:
+
+-- Identify the closest recent match for this description in the given date-sorted postings.
+similarPosting :: [Posting] -> String -> Maybe Posting
+similarPosting ps desc =
+  let matches =
+          sortBy compareRelevanceAndRecency
+                     $ filter ((> threshold).fst)
+                     [(maybe 0 (\t -> compareDescriptions desc (T.unpack $ tdescription t)) (ptransaction p), p) | p <- ps]
+              where
+                compareRelevanceAndRecency (n1,p1) (n2,p2) = compare (n2,postingDate p2) (n1,postingDate p1)
+                threshold = 0
+  in case matches of []  -> Nothing
+                     m:_ -> Just $ snd m
+
+-- -- Identify the closest recent match for this description in past transactions.
+-- similarTransaction :: Journal -> Query -> String -> Maybe Transaction
+-- similarTransaction j q desc =
+--   case historymatches = transactionsSimilarTo j q desc of
+--     ((,t):_) = Just t
+--     []       = Nothing
+
+compareDescriptions :: String -> String -> Double
+compareDescriptions s t = compareStrings s' t'
+    where s' = simplify s
+          t' = simplify t
+          simplify = filter (not . (`elem` ("0123456789"::String)))
+
+-- | Return a similarity measure, from 0 to 1, for two strings.
+-- This is Simon White's letter pairs algorithm from
+-- http://www.catalysoft.com/articles/StrikeAMatch.html
+-- with a modification for short strings.
+compareStrings :: String -> String -> Double
+compareStrings "" "" = 1
+compareStrings [_] "" = 0
+compareStrings "" [_] = 0
+compareStrings [a] [b] = if toUpper a == toUpper b then 1 else 0
+compareStrings s1 s2 = 2.0 * fromIntegral i / fromIntegral u
+    where
+      i = length $ intersect pairs1 pairs2
+      u = length pairs1 + length pairs2
+      pairs1 = wordLetterPairs $ uppercase s1
+      pairs2 = wordLetterPairs $ uppercase s2
+
+wordLetterPairs = concatMap letterPairs . words
+
+letterPairs (a:b:rest) = [a,b] : letterPairs (b:rest)
+letterPairs _ = []
 
 -- tests
 
@@ -187,7 +311,7 @@ tests_Register = testGroup "Register" [
 
    testGroup "postingsReportAsText" [
     testCase "unicode in register layout" $ do
-      j <- readJournal' "2009/01/01 * медвежья шкура\n  расходы:покупки  100\n  актив:наличные\n"
+      j <- readJournal'' "2009/01/01 * медвежья шкура\n  расходы:покупки  100\n  актив:наличные\n"
       let rspec = defreportspec
       (TL.unpack . postingsReportAsText defcliopts $ postingsReport rspec j)
         @?=

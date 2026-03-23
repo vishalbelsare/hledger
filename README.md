@@ -1,99 +1,228 @@
-# hledger project README
+# hledger
+## Robust, intuitive plain text accounting
+[![license](https://img.shields.io/badge/license-GPLv3+-brightgreen.svg)](https://www.gnu.org/licenses/gpl.html)
+[![on hackage](https://img.shields.io/hackage/v/hledger.svg?label=hackage&colorB=green)](https://hackage.haskell.org/package/hledger)
+[![](https://repology.org/badge/version-for-repo/stackage_nighly/hledger.svg)](https://repology.org/metapackage/hledger)
+[![](https://repology.org/badge/version-for-repo/stackage_lts/hledger.svg)](https://repology.org/metapackage/hledger)
+\
+[![Repo Health](https://api.gitscope.dev/api/badges/simonmichael/hledger/health.svg "Overall repository health score from 0-100%. Calculated from activity, maintenance, community engagement, and issue management.")](https://gitscope.dev/docs/badges)
+[![Maintained](https://api.gitscope.dev/api/badges/simonmichael/hledger/maintained.svg "Maintenance status: very active, active, maintained, or stale based on recent commit and issue activity.")](https://gitscope.dev/docs/badges)
+[![Response Time](https://api.gitscope.dev/api/badges/simonmichael/hledger/response-time.svg "Average time maintainers take to respond to new issues.")](https://gitscope.dev/docs/badges)
+[![Contributors](https://api.gitscope.dev/api/badges/simonmichael/hledger/contributors.svg "Total number of unique contributors to the repository. The true number as of 2025 is 185+.")](https://hledger.org/CREDITS.html)
+\
+[![Documentation](https://api.gitscope.dev/api/badges/simonmichael/hledger/docs.svg "Documentation quality indicator based on README completeness, wiki presence, and linked documentation.")](https://hledger.org/doc.html)
+[![Open issues, all kinds](https://img.shields.io/github/issues/simonmichael/hledger.svg "Open issues, all kinds.")](https://github.com/simonmichael/hledger/issues?q=is:issue+state:open)
+[![Open bugs](https://api.gitscope.dev/api/badges/simonmichael/hledger/label/A-BUG.svg "Open bugs")](https://github.com/simonmichael/hledger/issues?q=is:issue+label:A-BUG+state:open) 
+[![Open wishes](https://api.gitscope.dev/api/badges/simonmichael/hledger/label/A-WISH.svg "Open wishes")](https://github.com/simonmichael/hledger/issues?q=is:issue+label:A-WISH+state:open)
+[![Issues Resolved](https://api.gitscope.dev/api/badges/simonmichael/hledger/resolved.svg "Percentage of issues resolved/closed during last N days. Higher is better. Click to see closed bugs.")](https://github.com/simonmichael/hledger/issues?q=is:issue+state:closed)
 
-## lightweight, portable, dependable accounting tools
+<!--
+[![Contributor Friendly](https://api.gitscope.dev/api/badges/simonmichael/hledger/contributor-friendly.svg "Does the project welcome new contributors based on good first issues, contributing guides, and response patterns.")](https://hledger.org/CONTRIBUTING.html)
+[![Issues Welcome](https://api.gitscope.dev/api/badges/simonmichael/hledger/issues.svg "Does the project actively accept and respond to issue reports.")](https://hledger.org/ISSUES.html)
+-->
 
-hledger is a computer program for easily tracking money, time, or other commodities,
-on unix, mac and windows (and web-capable mobile devices, to some extent).
+Welcome! This is a brief intro to hledger. For a more detailed version, see the home page: **<https://hledger.org>**
 
-It is first a command-line tool, but there are also terminal and
-web interfaces, and a Haskell library for building your own
-programs and scripts (hledger is written in Haskell).  hledger was
-inspired by and is largely compatible with Ledger.  hledger is free
-software available under the GNU General Public License v3+.
+hledger is lightweight, cross platform, multi-currency, double-entry accounting software.
+It lets you track money, investments, cryptocurrencies, invoices, time, inventory and more, 
+in a safe, future-proof plain text data format with full version control and privacy. 
 
 hledger aims to help both computer experts and regular folks
-to gain clarity and control in their finances and time management,
-but currently it is a bit more suited to techies.
-I use it every day to:
+gain clarity in their finances and time management.
+Though the UIs are basic, hledger can model any accounting situation and provide precise, clear reports.
+It is reliable, quick, and backed by the highly supportive [Plain Text Accounting](https://plaintextaccounting.org) ecosystem. 
+Using it is an excellent way to learn double entry accounting.
 
--   track spending and income
--   see time reports by day/week/month/project
--   get accurate numbers for client billing and tax filing
--   track invoices
+Compared to [other PTA apps](https://plaintextaccounting.org/#software), 
+hledger is actively maintained, with regular releases,
+and a strong focus on being easy to use and practical for everyday accounting.
 
-Though limited in features, hledger is lightweight, usable and reliable.
-For some, it is a simpler, less distracting, more future-proof alternative to Quicken or GnuCash.
+More features:
+- Installs easily on unix, mac or windows
+- Complete, built-in documentation in multiple formats, beginner videos, tutorials etc.
+- Multiple UIs: command-line, terminal, web, mobile, editors/IDEs
+- Good at importing and exporting CSV; also outputs text/HTML/JSON/SQL
+- A robust, general, well-specified multi-currency accounting engine
+- Fast, analysing 25k transactions per second on a macbook air m1
+- Accurate to 255 decimal places
+- Supports your preferred account names, currencies, number formats
+- Inspired by and partly compatible with Ledger CLI; interconvertible with Beancount
+- Scriptable by CLI, HTTP or API, with plenty of examples
+- Clean Haskell codebase, continually improved since 2007, with $100 regression bounties
+- Free software licensed under GNU General Public License v3.0 or later.
 
-For more, see the home page: **<https://hledger.org>**
+## Examples
 
-## Sponsorship
+I use hledger to:
+- track income and spending, sometimes with budgets
+- see time reports by day/week/month/project
+- track reimbursables, invoices and payments
+- predict cashflow and account balances
+- get accurate numbers for tax filing
+- research past events
 
-Your support, large or small, helps keep this project strong!\
-See also **<https://hledger.org#sponsorship>**.
+Here's an example of the journal file format:
+```journal
+2022-01-01 opening balances as of this date
+    assets:bank:checking                $1000
+    assets:bank:savings                 $2000
+    assets:cash                          $100
+    liabilities:creditcard               $-50
+    equity:opening/closing balances
 
-<!-- keep synced with index.md: -->
+2022-01-15 market
+    expenses:food             $50
+    assets:cash              $-50
 
-Sponsor Simon (project leader):
-[![github](https://img.shields.io/badge/Sponsor_on-Github-limegreen "Sponsor the project leader via Github")](https://github.com/sponsors/simonmichael)
-[![liberapay](https://img.shields.io/badge/Sponsor_on-Liberapay-limegreen "Sponsor the project leader via Liberapay")](https://liberapay.com/simonmichael)
-[![paypal](https://www.paypal.com/en_US/i/btn/x-click-but04.gif "Give one time or recurringly via Paypal")](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=5J33NLXYXCYAY)
+2022-02-01 GOODWORKS CORP
+    assets:bank:checking           $1000
+    income:salary                 $-1000
+```
+and some simple reports:
+```cli
+$ hledger bs
+Balance Sheet 2022-02-15
 
-Sponsor the hledger project as an organisation:
-[![OpenCollective](https://opencollective.com/hledger/sponsors/badge.svg)][oc contributors] <!-- wrong count --> \
-[![](https://opencollective.com/hledger/sponsor/0/avatar.svg)](https://opencollective.com/hledger/sponsor/0/website)
-[![](https://opencollective.com/hledger/sponsor/1/avatar.svg)](https://opencollective.com/hledger/sponsor/1/website)
-[![](https://opencollective.com/hledger/sponsor/2/avatar.svg)](https://opencollective.com/hledger/sponsor/2/website)
-[![](https://opencollective.com/hledger/sponsor/3/avatar.svg)](https://opencollective.com/hledger/sponsor/3/website)
-[![](https://opencollective.com/hledger/sponsor/4/avatar.svg)](https://opencollective.com/hledger/sponsor/4/website)
-[![](https://opencollective.com/hledger/sponsor/5/avatar.svg)](https://opencollective.com/hledger/sponsor/5/website)
-[![](https://opencollective.com/hledger/sponsor/6/avatar.svg)](https://opencollective.com/hledger/sponsor/6/website)
-[![](https://opencollective.com/hledger/sponsor/7/avatar.svg)](https://opencollective.com/hledger/sponsor/7/website)
-[![](https://opencollective.com/hledger/sponsor/8/avatar.svg)](https://opencollective.com/hledger/sponsor/8/website)
-[![](https://opencollective.com/hledger/sponsor/9/avatar.svg)](https://opencollective.com/hledger/sponsor/9/website)
+                        || 2022-02-15 
+========================++============
+ Assets                 ||            
+------------------------++------------
+ assets:bank:checking   ||      $2000 
+ assets:bank:savings    ||      $2000 
+ assets:cash            ||        $50 
+------------------------++------------
+                        ||      $4050 
+========================++============
+ Liabilities            ||            
+------------------------++------------
+ liabilities:creditcard ||        $50 
+------------------------++------------
+                        ||        $50 
+========================++============
+ Net:                   ||      $4000 
+```
+```cli
+$ hledger is --monthly                                            
+Income Statement 2022-01-01..2022-02-28                                               
+                                                                                      
+               ||  Jan    Feb                                                         
+===============++=============                                                        
+ Revenues      ||                                                                     
+---------------++-------------                                                        
+ income:salary ||    0  $1000                                                         
+---------------++-------------                                                        
+               ||    0  $1000                                                         
+===============++=============                                                        
+ Expenses      ||                                                                     
+---------------++-------------                                                        
+ expenses:food ||  $50      0                                                         
+---------------++-------------                                                        
+               ||  $50      0                                                         
+===============++=============                                                        
+ Net:          || $-50  $1000                                                         
+```
 
-Sponsor the hledger project as an individual:
-[![OpenCollective](https://opencollective.com/hledger/backers/badge.svg)][oc contributors] <!-- wrong count --> \
-[![](https://opencollective.com/hledger/backer/0/avatar.svg)](https://opencollective.com/hledger/backer/0/website)
-[![](https://opencollective.com/hledger/backer/1/avatar.svg)](https://opencollective.com/hledger/backer/1/website)
-[![](https://opencollective.com/hledger/backer/2/avatar.svg)](https://opencollective.com/hledger/backer/2/website)
-[![](https://opencollective.com/hledger/backer/3/avatar.svg)](https://opencollective.com/hledger/backer/3/website)
-[![](https://opencollective.com/hledger/backer/4/avatar.svg)](https://opencollective.com/hledger/backer/4/website)
-[![](https://opencollective.com/hledger/backer/5/avatar.svg)](https://opencollective.com/hledger/backer/5/website)
-[![](https://opencollective.com/hledger/backer/6/avatar.svg)](https://opencollective.com/hledger/backer/6/website)
-[![](https://opencollective.com/hledger/backer/7/avatar.svg)](https://opencollective.com/hledger/backer/7/website)
-[![](https://opencollective.com/hledger/backer/8/avatar.svg)](https://opencollective.com/hledger/backer/8/website)
-[![](https://opencollective.com/hledger/backer/9/avatar.svg)](https://opencollective.com/hledger/backer/9/website)
-[![](https://opencollective.com/hledger/backer/10/avatar.svg)](https://opencollective.com/hledger/backer/10/website)
-[![](https://opencollective.com/hledger/backer/11/avatar.svg)](https://opencollective.com/hledger/backer/11/website)
-[![](https://opencollective.com/hledger/backer/12/avatar.svg)](https://opencollective.com/hledger/backer/12/website)
-[![](https://opencollective.com/hledger/backer/13/avatar.svg)](https://opencollective.com/hledger/backer/13/website)
-[![](https://opencollective.com/hledger/backer/14/avatar.svg)](https://opencollective.com/hledger/backer/14/website)
-[![](https://opencollective.com/hledger/backer/15/avatar.svg)](https://opencollective.com/hledger/backer/15/website)
-[![](https://opencollective.com/hledger/backer/16/avatar.svg)](https://opencollective.com/hledger/backer/16/website)
-[![](https://opencollective.com/hledger/backer/17/avatar.svg)](https://opencollective.com/hledger/backer/17/website)
-[![](https://opencollective.com/hledger/backer/18/avatar.svg)](https://opencollective.com/hledger/backer/18/website)
-[![](https://opencollective.com/hledger/backer/19/avatar.svg)](https://opencollective.com/hledger/backer/19/website)
-[![](https://opencollective.com/hledger/backer/20/avatar.svg)](https://opencollective.com/hledger/backer/20/website)
+More examples and screenshots: <https://hledger.org/#how-to-get-started>
 
-Bounties for specific tasks:
-[![all bounties](https://img.shields.io/badge/github-All_bountied_issues-30bae8 "all bountied issues, bountysource and otherwise")](https://github.com/simonmichael/hledger/issues?q=label:bounty)
-[![bountysource bounties](https://api.bountysource.com/badge/team?team_id=75979&style=bounties_received "issues bountied via bountysource")](https://www.bountysource.com/teams/hledger)
+## Funding
 
+hledger is brought to you by
+[Simon Michael](http://joyful.com),
+[140+ contributors](doc/CREDITS.md),
+and the generous financial sponsors below.
 
-<br>
-<br>
-<br>
+After enjoying some personal or organisational success with hledger,
+you might want to become one of them, to help support this work.
+It's easy! Please see <https://hledger.org/sponsor.html> for details.
 
-[![license](https://img.shields.io/badge/license-GPLv3+-brightgreen.svg)](http://www.gnu.org/licenses/gpl.html)
-[![hledger CI](https://github.com/simonmichael/hledger/workflows/hledger%20CI/badge.svg)](https://github.com/simonmichael/hledger/actions)
-[![on hackage](https://img.shields.io/hackage/v/hledger.svg?label=hackage&colorB=green)](http://hackage.haskell.org/package/hledger)
-[![](https://img.shields.io/hackage-deps/v/hledger-lib.svg?label=hledger-lib+bounds)](http://packdeps.haskellers.com/feed?needle=hledger-lib)
-[![](https://img.shields.io/hackage-deps/v/hledger.svg?label=hledger+bounds)](http://packdeps.haskellers.com/feed?needle=hledger)
-[![](https://img.shields.io/hackage-deps/v/hledger-ui.svg?label=hledger-ui+bounds)](http://packdeps.haskellers.com/feed?needle=hledger-ui)
-[![](https://img.shields.io/hackage-deps/v/hledger-web.svg?label=hledger-web+bounds)](http://packdeps.haskellers.com/feed?needle=hledger-web)
-[![](https://repology.org/badge/version-for-repo/stackage_lts/hledger.svg)](https://repology.org/metapackage/hledger)
-[![](https://repology.org/badge/version-for-repo/stackage_nighly/hledger.svg)](https://repology.org/metapackage/hledger)
-[![github issues](https://img.shields.io/github/issues/simonmichael/hledger.svg)](http://bugs.hledger.org)
+<!-- keep synced with sponsor.md: -->
 
+### Organisational sponsors
 
-[oc contributors]: https://opencollective.com/hledger#section-contributors
+<a href="https://opencollective.com/hledger/organization/0/website"><img src="https://opencollective.com/hledger/organization/0/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/1/website"><img src="https://opencollective.com/hledger/organization/1/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/2/website"><img src="https://opencollective.com/hledger/organization/2/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/3/website"><img src="https://opencollective.com/hledger/organization/3/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/4/website"><img src="https://opencollective.com/hledger/organization/4/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/5/website"><img src="https://opencollective.com/hledger/organization/5/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/6/website"><img src="https://opencollective.com/hledger/organization/6/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/7/website"><img src="https://opencollective.com/hledger/organization/7/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/8/website"><img src="https://opencollective.com/hledger/organization/8/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/9/website"><img src="https://opencollective.com/hledger/organization/9/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/10/website"><img src="https://opencollective.com/hledger/organization/10/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/11/website"><img src="https://opencollective.com/hledger/organization/11/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/12/website"><img src="https://opencollective.com/hledger/organization/12/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/13/website"><img src="https://opencollective.com/hledger/organization/13/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/14/website"><img src="https://opencollective.com/hledger/organization/14/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/15/website"><img src="https://opencollective.com/hledger/organization/15/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/16/website"><img src="https://opencollective.com/hledger/organization/16/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/17/website"><img src="https://opencollective.com/hledger/organization/17/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/18/website"><img src="https://opencollective.com/hledger/organization/18/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/19/website"><img src="https://opencollective.com/hledger/organization/19/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/20/website"><img src="https://opencollective.com/hledger/organization/20/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/21/website"><img src="https://opencollective.com/hledger/organization/21/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/22/website"><img src="https://opencollective.com/hledger/organization/22/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/23/website"><img src="https://opencollective.com/hledger/organization/23/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/24/website"><img src="https://opencollective.com/hledger/organization/24/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/25/website"><img src="https://opencollective.com/hledger/organization/25/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/26/website"><img src="https://opencollective.com/hledger/organization/26/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/27/website"><img src="https://opencollective.com/hledger/organization/27/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/28/website"><img src="https://opencollective.com/hledger/organization/28/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/29/website"><img src="https://opencollective.com/hledger/organization/29/avatar.svg?avatarHeight=200"></a>
+<a href="https://opencollective.com/hledger/organization/30/website"><img src="https://opencollective.com/hledger/organization/30/avatar.svg?avatarHeight=200"></a>
+
+### Individual sponsors
+
+<a href="https://opencollective.com/hledger/individual/0/website"><img src="https://opencollective.com/hledger/individual/0/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/1/website"><img src="https://opencollective.com/hledger/individual/1/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/2/website"><img src="https://opencollective.com/hledger/individual/2/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/3/website"><img src="https://opencollective.com/hledger/individual/3/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/4/website"><img src="https://opencollective.com/hledger/individual/4/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/5/website"><img src="https://opencollective.com/hledger/individual/5/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/6/website"><img src="https://opencollective.com/hledger/individual/6/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/7/website"><img src="https://opencollective.com/hledger/individual/7/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/8/website"><img src="https://opencollective.com/hledger/individual/8/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/9/website"><img src="https://opencollective.com/hledger/individual/9/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/10/website"><img src="https://opencollective.com/hledger/individual/10/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/11/website"><img src="https://opencollective.com/hledger/individual/11/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/12/website"><img src="https://opencollective.com/hledger/individual/12/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/13/website"><img src="https://opencollective.com/hledger/individual/13/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/14/website"><img src="https://opencollective.com/hledger/individual/14/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/15/website"><img src="https://opencollective.com/hledger/individual/15/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/16/website"><img src="https://opencollective.com/hledger/individual/16/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/17/website"><img src="https://opencollective.com/hledger/individual/17/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/18/website"><img src="https://opencollective.com/hledger/individual/18/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/19/website"><img src="https://opencollective.com/hledger/individual/19/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/20/website"><img src="https://opencollective.com/hledger/individual/20/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/21/website"><img src="https://opencollective.com/hledger/individual/21/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/22/website"><img src="https://opencollective.com/hledger/individual/22/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/23/website"><img src="https://opencollective.com/hledger/individual/23/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/24/website"><img src="https://opencollective.com/hledger/individual/24/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/25/website"><img src="https://opencollective.com/hledger/individual/25/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/26/website"><img src="https://opencollective.com/hledger/individual/26/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/27/website"><img src="https://opencollective.com/hledger/individual/27/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/28/website"><img src="https://opencollective.com/hledger/individual/28/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/29/website"><img src="https://opencollective.com/hledger/individual/29/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/30/website"><img src="https://opencollective.com/hledger/individual/30/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/31/website"><img src="https://opencollective.com/hledger/individual/31/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/32/website"><img src="https://opencollective.com/hledger/individual/32/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/33/website"><img src="https://opencollective.com/hledger/individual/33/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/34/website"><img src="https://opencollective.com/hledger/individual/34/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/35/website"><img src="https://opencollective.com/hledger/individual/35/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/36/website"><img src="https://opencollective.com/hledger/individual/36/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/37/website"><img src="https://opencollective.com/hledger/individual/37/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/38/website"><img src="https://opencollective.com/hledger/individual/38/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/39/website"><img src="https://opencollective.com/hledger/individual/39/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/40/website"><img src="https://opencollective.com/hledger/individual/40/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/41/website"><img src="https://opencollective.com/hledger/individual/41/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/42/website"><img src="https://opencollective.com/hledger/individual/42/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/43/website"><img src="https://opencollective.com/hledger/individual/43/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/44/website"><img src="https://opencollective.com/hledger/individual/44/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/45/website"><img src="https://opencollective.com/hledger/individual/45/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/46/website"><img src="https://opencollective.com/hledger/individual/46/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/47/website"><img src="https://opencollective.com/hledger/individual/47/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/48/website"><img src="https://opencollective.com/hledger/individual/48/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/49/website"><img src="https://opencollective.com/hledger/individual/49/avatar.svg?avatarHeight=100"></a>
+<a href="https://opencollective.com/hledger/individual/50/website"><img src="https://opencollective.com/hledger/individual/50/avatar.svg?avatarHeight=100"></a>
+
+<!-- (If your logo/avatar isn't appearing here, eg because you didn't use Open Collective, please [let me know](mailto:webmaster@hledger.org).) -->

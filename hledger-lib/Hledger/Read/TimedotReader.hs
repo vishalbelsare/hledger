@@ -28,7 +28,6 @@ inc.client1   .... .... ..
 
 --- ** language
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PackageImports #-}
 
 --- ** exports
 module Hledger.Read.TimedotReader (
@@ -41,19 +40,23 @@ where
 
 --- ** imports
 import Control.Monad
-import Control.Monad.Except (ExceptT)
+import Control.Monad.Except (ExceptT, liftEither)
 import Control.Monad.State.Strict
 import Data.Char (isSpace)
-import Data.List (foldl')
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time (Day)
 import Text.Megaparsec hiding (parse)
 import Text.Megaparsec.Char
 
 import Hledger.Data
-import Hledger.Read.Common hiding (emptyorcommentlinep)
+import Hledger.Read.Common
 import Hledger.Utils
+import Data.Decimal (roundTo)
+import Data.Functor ((<&>))
+import Data.List (sort)
+import Data.List (group)
+-- import Text.Megaparsec.Debug (dbg)
 
 --- ** doctest setup
 -- $setup
@@ -63,24 +66,24 @@ import Hledger.Utils
 
 reader :: MonadIO m => Reader m
 reader = Reader
-  {rFormat     = "timedot"
+  {rFormat     = Timedot
   ,rExtensions = ["timedot"]
-  ,rReadFn     = parse
+  ,rReadFn     = handleReadFnToTextReadFn parse
   ,rParser    = timedotp
   }
 
 -- | Parse and post-process a "Journal" from the timedot format, or give an error.
 parse :: InputOpts -> FilePath -> Text -> ExceptT String IO Journal
-parse = parseAndFinaliseJournal' timedotp
+parse iopts fp t = initialiseAndParseJournal (timedotp iopts) iopts fp t
+                   >>= liftEither . journalApplyAliases (aliasesFromOpts iopts)
+                   >>= journalFinalise iopts fp t
 
 --- ** utilities
 
-traceparse, traceparse' :: String -> TextParser m ()
-traceparse  = const $ return ()
-traceparse' = const $ return ()
--- for debugging:
--- traceparse  s = traceParse (s++"?")
--- traceparse' s = trace s $ return ()
+-- Trace parser state above a certain --debug level ?
+tracelevel = 9
+dp :: String -> JournalParser m ()
+dp = if tracelevel >= 0 then lift . dbgparse tracelevel else const $ return ()
 
 --- ** parsers
 {-
@@ -103,16 +106,15 @@ Org headings before the first date line are ignored, regardless of content.
 
 timedotfilep = timedotp -- XXX rename export above
 
-timedotp :: JournalParser m ParsedJournal
-timedotp = preamblep >> many dayp >> eof >> get
+timedotp :: InputOpts -> JournalParser m ParsedJournal
+timedotp _ = preamblep >> many dayp >> eof >> get
 
 preamblep :: JournalParser m ()
 preamblep = do
-  lift $ traceparse "preamblep"
-  many $ notFollowedBy datelinep >> (lift $ emptyorcommentlinep "#;*")
-  lift $ traceparse' "preamblep"
+  dp "preamblep"
+  void $ many $ notFollowedBy datelinep >> (lift $ emptyorcommentlinep2 "#;*")
 
--- | Parse timedot day entries to zero or more time transactions for that day.
+-- | Parse timedot day entries to multi-posting time transactions for that day.
 -- @
 -- 2020/2/1 optional day description
 -- fos.haskell  .... ..
@@ -121,84 +123,94 @@ preamblep = do
 -- @
 dayp :: JournalParser m ()
 dayp = label "timedot day entry" $ do
-  lift $ traceparse "dayp"
-  (d,desc) <- datelinep
+  dp "dayp"
+  pos <- getSourcePos
+  (date,desc,comment,tags) <- datelinep
+  dp "dayp1"
   commentlinesp
-  ts <- many $ entryp <* commentlinesp
-  modify' $ addTransactions $ map (\t -> t{tdate=d, tdescription=desc}) ts
-  lift $ traceparse' "dayp"
-  where
-    addTransactions :: [Transaction] -> Journal -> Journal
-    addTransactions ts j = foldl' (flip ($)) j (map addTransaction ts)
+  dp "dayp2"
+  ps <- (many $ dp "dayp3" >> timedotentryp <* commentlinesp) <&> concat
+  endpos <- getSourcePos
+  let t = txnTieKnot $ nulltransaction{
+    tsourcepos   = (pos, endpos),
+    tdate        = date,
+    tstatus      = Cleared,
+    tdescription = desc,
+    tcomment     = comment,
+    ttags        = tags,
+    tpostings    = ps
+    }
+  modify' $ addTransaction t
 
-datelinep :: JournalParser m (Day,Text)
+datelinep :: JournalParser m (Day,Text,Text,[Tag])
 datelinep = do
-  lift $ traceparse "datelinep"
+  dp "datelinep"
   lift $ optional orgheadingprefixp
-  d <- datep
-  desc <- strip <$> lift restofline
-  lift $ traceparse' "datelinep"
-  return (d, T.pack desc)
+  date <- datep
+  desc <- T.strip <$> lift descriptionp
+  (comment, tags) <- lift transactioncommentp
+  return (date, desc, comment, tags)
 
 -- | Zero or more empty lines or hash/semicolon comment lines
 -- or org headlines which do not start a new day.
 commentlinesp :: JournalParser m ()
 commentlinesp = do
-  lift $ traceparse "commentlinesp"
-  void $ many $ try $ lift $ emptyorcommentlinep "#;"
+  dp "commentlinesp"
+  void $ many $ try $ lift $ emptyorcommentlinep2 "#;"
 
 -- orgnondatelinep :: JournalParser m ()
 -- orgnondatelinep = do
---   lift $ traceparse "orgnondatelinep"
+--   dp "orgnondatelinep"
 --   lift orgheadingprefixp
 --   notFollowedBy datelinep
 --   void $ lift restofline
---   lift $ traceparse' "orgnondatelinep"
 
-orgheadingprefixp = do
-  -- traceparse "orgheadingprefixp"
-  skipSome (char '*') >> skipNonNewlineSpaces1
+orgheadingprefixp = skipSome (char '*') >> skipNonNewlineSpaces1
 
 -- | Parse a single timedot entry to one (dateless) transaction.
 -- @
 -- fos.haskell  .... ..
 -- @
-entryp :: JournalParser m Transaction
-entryp = do
-  lift $ traceparse "entryp"
-  pos <- getSourcePos
+timedotentryp :: JournalParser m [Posting]
+timedotentryp = do
+  dp "timedotentryp"
   notFollowedBy datelinep
   lift $ optional $ choice [orgheadingprefixp, skipNonNewlineSpaces1]
-  a <- modifiedaccountnamep
+  a <- modifiedaccountnamep False
   lift skipNonNewlineSpaces
-  hrs <-
-    try (lift followingcommentp >> return 0)
-    <|> (durationp <*
-         (try (lift followingcommentp) <|> (newline >> return "")))
+  taggedhours <- lift durationsp
+  (comment0, tags0) <-
+         lift transactioncommentp    -- not postingp, don't bother with date: tags here
+     <|> (newline >> return ("",[]))
   mcs <- getDefaultCommodityAndStyle
   let 
     (c,s) = case mcs of
       Just (defc,defs) -> (defc, defs{asprecision=max (asprecision defs) (Precision 2)})
       _ -> ("", amountstyle{asprecision=Precision 2})
-    t = nulltransaction{
-          tsourcepos = (pos, pos),
-          tstatus    = Cleared,
-          tpostings  = [
-            nullposting{paccount=a
-                      ,pamount=mixedAmount $ nullamt{acommodity=c, aquantity=hrs, astyle=s}
-                      ,ptype=VirtualPosting
-                      ,ptransaction=Just t
-                      }
-            ]
-          }
-  lift $ traceparse' "entryp"
-  return t
+    ps = [
+      nullposting{paccount=a
+                ,pamount=mixedAmount $ nullamt{acommodity=c, aquantity=hours, astyle=s}
+                ,ptype=VirtualPosting
+                ,pcomment=comment
+                ,ptags=tags
+                }
+      | (hours,tagval) <- taggedhours
+      , let tag = ("t",tagval)
+      , let tags    = if T.null tagval then tags0    else tags0 ++ [tag]
+      , let comment = if T.null tagval then comment0 else comment0 `commentAddTagUnspaced` tag
+      ]
+  return ps
 
-durationp :: JournalParser m Quantity
-durationp = do
-  lift $ traceparse "durationp"
-  try numericquantityp <|> dotquantityp
-    -- <* traceparse' "durationp"
+type Hours = Quantity
+
+-- | Parse one or more durations in hours, each with an optional tag value
+-- (or empty string for none).
+durationsp :: TextParser m [(Hours,TagValue)]
+durationsp =
+      (try numericquantityp <&> \h -> [(h,"")])  -- try needed because numbers can begin with .
+  <|> (dotquantityp     <&> \h -> [(h,"")])
+  <|> letterquantitiesp
+  <|> pure [(0,"")]
 
 -- | Parse a duration of seconds, minutes, hours, days, weeks, months or years,
 -- written as a decimal number followed by s, m, h, d, w, mo or y, assuming h
@@ -209,16 +221,16 @@ durationp = do
 -- 1.5h
 -- 90m
 -- @
-numericquantityp :: JournalParser m Quantity
+numericquantityp :: TextParser m Hours
 numericquantityp = do
-  -- lift $ traceparse "numericquantityp"
-  (q, _, _, _) <- lift $ numberp Nothing
+  -- dp "numericquantityp"
+  (q, _, _, _) <- numberp Nothing
   msymbol <- optional $ choice $ map (string . fst) timeUnits
-  lift skipNonNewlineSpaces
+  skipNonNewlineSpaces
   let q' =
         case msymbol of
           Nothing  -> q
-          Just sym ->
+          Just sym -> roundTo 2 $
             case lookup sym timeUnits of
               Just mult -> q * mult
               Nothing   -> q  -- shouldn't happen.. ignore
@@ -235,28 +247,30 @@ timeUnits =
   ,("y",61320)
   ]
 
--- | Parse a quantity written as a line of dots, each representing 0.25.
+-- | Parse a quantity written as a line of one or more dots,
+-- each representing 0.25, ignoring any interspersed spaces
+-- after the first dot.
 -- @
 -- .... ..
 -- @
-dotquantityp :: JournalParser m Quantity
+dotquantityp :: TextParser m Hours
 dotquantityp = do
-  -- lift $ traceparse "dotquantityp"
-  dots <- filter (not.isSpace) <$> many (oneOf (". " :: [Char]))
-  return $ fromIntegral (length dots) / 4
+  -- dp "dotquantityp"
+  char '.'
+  dots <- many (oneOf ['.', ' ']) <&> filter (not.isSpace)
+  return $ fromIntegral (1 + length dots) / 4
 
--- | XXX new comment line parser, move to Hledger.Read.Common.emptyorcommentlinep
--- Parse empty lines, all-blank lines, and lines beginning with any of the provided
--- comment-beginning characters.
-emptyorcommentlinep :: [Char] -> TextParser m ()
-emptyorcommentlinep cs =
-  label ("empty line or comment line beginning with "++cs) $ do
-    traceparse "emptyorcommentlinep" -- XXX possible to combine label and traceparse ?
-    skipNonNewlineSpaces
-    void newline <|> void commentp
-    traceparse' "emptyorcommentlinep"
-    where
-      commentp = do
-        choice (map (some.char) cs)
-        takeWhileP Nothing (/='\n') <* newline
-
+-- | Parse a quantity written as a line of one or more letters,
+-- each representing 0.25 with a tag "t" whose value is the letter,
+-- ignoring any interspersed spaces after the first letter.
+letterquantitiesp :: TextParser m [(Hours, TagValue)]
+letterquantitiesp =
+  -- dp "letterquantitiesp"
+  do
+    letter1 <- letterChar
+    letters <- many (letterChar <|> spacenonewline) <&> filter (not.isSpace)
+    let groups =
+          [ (fromIntegral (length t) / 4, T.singleton c)
+          | t@(c:_) <- group $ sort $ letter1:letters
+          ]
+    return groups

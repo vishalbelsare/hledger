@@ -1,24 +1,25 @@
 ---
-name:  A wish
-about: A request or proposal for improving hledger's software, documentation, marketing, usability...
+name: A wish
+about: A proposal for improving hledger or the project
 labels: A WISH
+title: ''
+assignees: ''
 ---
 
-Thank you for helping to make hledger better!
-You can delete this template text before submitting.
+Thanks for contributing. But first:
 
-Some things to check before requesting:
+- Have you looked for related features in the hledger manual (latest version) ?
+  https://hledger.org/hledger.html
+  https://hledger.org/hledger-ui.html
+  https://hledger.org/hledger-web.html
 
-- We try to not clutter the bug tracker with too many wishlist items.
-  Often it's best to discuss and attract interest on chat or the mail list first;
-  use your best judgement. https://hledger.org#help-feedback
+- Ideas are endless and developers are few, so we try to not clutter the bug tracker with wishes.
+  Often it's best to discuss them on chat/mail list/forum first:
+  https://hledger.org/support
 
-- Have you looked for related features in (the right version of) the user manual ? 
-  Use `hledger help [--help]` to view the built-in manuals,
-  or view the hledger.org -> USER MANUALS and choose the proper version
-  at the top of the page.
+- Concrete proposals with draft docs move forward more quickly. Consider adding:
+  - A draft of user manual changes
+  - A draft of command line help
+  - A mockup of intended output or UI
 
-Things that will move your request along faster:
-
-- A small example or mockup of your intended UI/output
-- A rough draft of intended command line help/reference documentation
+(Please remove all of this text before submitting.)

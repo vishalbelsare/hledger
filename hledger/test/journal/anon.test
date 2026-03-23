@@ -1,3 +1,4 @@
+# * --anon flag
 
 # Input for the following tests:
 
@@ -12,29 +13,41 @@ alias tips=expenses:tips
     (liabilities)   1
     (tips)  3
 
+# ** 1.
+$ hledger -f- print --anon
+>2 /--anon does not give privacy/
+>=1
+
 # Basic tests on accounts
 
-$ hledger -f- print --anon
+# ** 2.
+$ hledger -f- print --obfuscate
 > !/assets|liabilities|expenses|tips/
 
-$ hledger -f- reg --anon
+# ** 3.
+$ hledger -f- reg --obfuscate
 > !/assets|liabilities|expenses|tips/
 
-$ hledger -f- bal --anon
+# ** 4.
+$ hledger -f- bal --obfuscate
 > !/assets|liabilities|expenses|tips/
 
-$ hledger -f- accounts --anon
+# ** 5.
+$ hledger -f- accounts --obfuscate
 > !/assets|liabilities|expenses|tips/
 
 # Basic tests on descriptions and comments
 
-$ hledger -f- print --anon
+# ** 6.
+$ hledger -f- print --obfuscate
 > !/borrow|signed/
 
-$ hledger -f- reg --anon
+# ** 7.
+$ hledger -f- reg --obfuscate
 > !/borrow/
 
 # Basic tests on transaction code
 
-$ hledger -f- print --anon
+# ** 8.
+$ hledger -f- print --obfuscate
 > !/receipt/

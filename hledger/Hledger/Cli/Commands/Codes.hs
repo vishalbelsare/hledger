@@ -15,8 +15,8 @@ module Hledger.Cli.Commands.Codes (
  ,codes
 ) where
 
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
 
 import Hledger
 import Hledger.Cli.CliOptions
@@ -26,7 +26,7 @@ import Hledger.Cli.CliOptions
 codesmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Codes.txt")
   []
-  [generalflagsgroup1]
+  cligeneralflagsgroups1
   hiddenflags
   ([], Just $ argsFlag "[QUERY]")
 
@@ -34,6 +34,6 @@ codesmode = hledgerCommandMode
 codes :: CliOpts -> Journal -> IO ()
 codes CliOpts{reportspec_=rspec} j = do
   let ts = entriesReport rspec j
-      codes = (if empty_ (_rsReportOpts rspec) then id else filter (not . T.null)) $
+      codes' = (if empty_ (_rsReportOpts rspec) then id else filter (not . T.null)) $
               map tcode ts
-  mapM_ T.putStrLn codes
+  mapM_ T.putStrLn codes'

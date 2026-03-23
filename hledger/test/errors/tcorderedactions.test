@@ -1,0 +1,15 @@
+$$$ hledger check -f  tcorderedactions.timeclock
+>>>2 /Error: .*tcorderedactions.timeclock:8:1:
+8 \| i 2022-01-01 00:01:00 a  
+
+overlaps with session beginning at:
+
+.*
+7 \| i 2022-01-01 00:00:00 a  
+
+Overlapping sessions with the same account name are not supported.
+/
+>>>= 1
+
+
+

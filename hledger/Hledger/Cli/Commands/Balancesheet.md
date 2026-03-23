@@ -1,39 +1,92 @@
-balancesheet, bs\
-This command displays a balance sheet, showing historical ending
-balances of asset and liability accounts. (To see equity as well,
-use the [balancesheetequity](#balancesheetequity) command.)
-Amounts are shown with normal positive sign, as in conventional
-financial statements.
+## balancesheet
 
-_FLAGS
+(bs)
 
-The asset and liability accounts shown are those accounts declared
-with the `Asset` or `Cash` or `Liability` type, or otherwise all
-accounts under a top-level `asset` or `liability` account (case
-insensitive, plurals allowed).
+Show the end balances in asset and liability accounts.
+Amounts are shown with normal positive sign, as in conventional financial statements.
+
+```flags
+Flags:
+     --sum                  calculation mode: show sum of posting amounts
+                            (default)
+     --valuechange          calculation mode: show total change of value of
+                            period-end historical balances (caused by deposits,
+                            withdrawals, market price fluctuations)
+     --gain                 calculation mode: show unrealised capital
+                            gain/loss (historical balance value minus cost
+                            basis)
+     --count                calculation mode: show the count of postings
+     --change               accumulation mode: accumulate amounts from column
+                            start to column end (in multicolumn reports)
+     --cumulative           accumulation mode: accumulate amounts from report
+                            start (specified by e.g. -b/--begin) to column end
+  -H --historical           accumulation mode: accumulate amounts from
+                            journal start to column end (includes postings
+                            before report start date) (default)
+  -l --flat                 list/tree mode: show accounts as a flat list
+                            (default). Amounts exclude subaccount amounts,
+                            except where the account is depth-clipped.
+  -t --tree                 list/tree mode: show accounts as a tree. Amounts
+                            include subaccount amounts.
+     --drop=N               in list mode, omit N leading account name parts
+     --declared             include non-parent declared accounts (best used
+                            with -E)
+  -A --average              show a row average column (in multicolumn
+                            reports)
+  -T --row-total            show a row total column (in multicolumn reports)
+     --summary-only         display only row summaries (e.g. row total,
+                            average) (in multicolumn reports)
+  -N --no-total             omit the final total row
+     --no-elide             in tree mode, don't squash boring parent accounts
+     --format=FORMATSTR     use this custom line format (in simple reports)
+  -S --sort-amount          sort by amount instead of account code/name
+  -% --percent              express values in percentage of each column's
+                            total
+     --layout=ARG           how to show multi-commodity amounts:
+                            'wide[,WIDTH]': all commodities on one line
+                            'tall'        : each commodity on a new line
+                            'bare'        : bare numbers, symbols in a column
+     --base-url=URLPREFIX   in html output, generate hyperlinks to
+                            hledger-web, with this prefix. (Usually the base
+                            url shown by hledger-web; can also be relative.)
+  -O --output-format=FMT    select the output format. Supported formats:
+                            txt, html, csv, tsv, json.
+  -o --output-file=FILE     write output to FILE. A file extension matching
+                            one of the above formats selects that format.
+```
+
+This command displays a [balance sheet](https://en.wikipedia.org/wiki/Balance_sheet), 
+showing historical ending balances of asset and liability accounts. 
+(To see equity as well, use the [balancesheetequity](#balancesheetequity) command.)
+
+Accounts declared with the `Asset`, `Cash` or `Liability` type are shown
+(see [account types](https://hledger.org/hledger.html#account-types)).
+Or if no such accounts are declared, it shows top-level accounts named
+`asset` or `liability` (case insensitive, plurals allowed) and their subaccounts.
 
 Example:
 
-```shell
+```cli
 $ hledger balancesheet
-Balance Sheet
+Balance Sheet 2008-12-31
 
-Assets:
-                 $-1  assets
-                  $1    bank:saving
-                 $-2    cash
---------------------
-                 $-1
-
-Liabilities:
-                  $1  liabilities:debts
---------------------
-                  $1
-
-Total:
---------------------
-                   0
-```
+                    || 2008-12-31 
+====================++============
+ Assets             ||            
+--------------------++------------
+ assets:bank:saving ||         $1 
+ assets:cash        ||        $-2 
+--------------------++------------
+                    ||        $-1 
+====================++============
+ Liabilities        ||            
+--------------------++------------
+ liabilities:debts  ||        $-1 
+--------------------++------------
+                    ||        $-1 
+====================++============
+ Net:               ||          0 
+ ```
 
 This command is a higher-level variant of the [`balance`](#balance) command,
 and supports many of that command's features, such as multi-period reports.
@@ -45,4 +98,4 @@ This command also supports the
 [output destination](hledger.html#output-destination) and
 [output format](hledger.html#output-format) options
 The output formats supported are
-`txt`, `csv`, `html`, and (experimental) `json`.
+`txt`, `csv`, `tsv` (*Added in 1.32*), `html`, and `json`.

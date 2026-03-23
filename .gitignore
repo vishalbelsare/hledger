@@ -1,43 +1,31 @@
+# For troubleshooting: git check-ignore -v --no-index PATHS
+
 # misc stuff
 _*
 *~
 *.o
 \#*
 .\#*
+.trash
+*.gz
+*.zip
 
 # dev stuff
 .build
 .idea
 *.iml
 .shake
+.stack*
 .tmp
 .vscode
 tags
 TAGS
-/debug.log
-/tools/pandoc-demote-headers
-/tools/pandoc-drop-html-blocks
-/tools/pandoc-drop-html-inlines
-/tools/pandoc-drop-links
-/tools/pandoc-drop-notes
-/tools/pandoc-drop-toc
-/tools/generatetimeclock
-
-# Tricksy rules ignoring some typical temp files.
-# For troubleshooting: git check-ignore --verbose PATHS...
-# 1- or 2-character filenames, maybe with an extension; but not directories
-[a-z0-9]
-[a-z0-9].*
-[a-z0-9][a-z0-9]
-[a-z0-9][a-z0-9].*
-![a-z0-9]/
-![a-z0-9].*/
-![a-z0-9][a-z0-9]/
-![a-z0-9][a-z0-9].*/
-# files/directories beginning with a number
-/[0-9]*
-*.j
-*.sw[op]
+.obsidian
+stylish-haskell.yaml
+*.m4-e
+/.apl.history
+/.beads.AGENTS.md
+/.gitattributes
 
 # haskell stuff
 *.dyn_hi
@@ -45,6 +33,7 @@ TAGS
 *.hi
 *.p_o
 *.hp
+*.prof
 package.yaml-e
 .cabal-sandbox/
 cabal-dev*
@@ -53,31 +42,35 @@ cabal.sandbox.config
 dist/
 dist-newstyle/
 .ghc.environment.*
+stack*.yaml.lock
+.stack-work/
 /Shake
 /.shake.html
-.stack-work/
-/lsp/
 Setup
+modules*.svg
+packages*.svg
+/*.packages
+/headroom-templates
+.headroom.yaml
 
-# hledger stuff
-old
-/.old
-/log
-/profs/*
-/*.prof.*
-/bin/**
-!/bin/*.hs
-!/bin/*.sh
-!/bin/*.md
-/.latest.*
-hledger/test/addons/hledger-*
-tools/generatejournal
-tools/simplebench
-/examples/[1-9]0*.journal
-*.webmanual.md
-*.m4-e
-stack*.yaml.lock
-bench
+# ignore typical test file names (but not dirs)
+
+/[0-9]*
+!/[0-9]*/
+
+[a-z0-9]
+![a-z0-9]/
+
+[a-z0-9][a-z0-9]
+![a-z0-9][a-z0-9]/
+
+/[a-z0-9].*
+![a-z0-9].*/
+
+/[a-z0-9][a-z0-9].*
+![a-z0-9][a-z0-9].*/
+
+/test*
 
 # hledger-web stuff
 /config
@@ -87,16 +80,47 @@ bench
 hledger-web/static/tmp/
 hledger-web/yesod-devel/
 .hledger-web_client_session_key.aes
+/hledger-web/demo/
 
-# sandstorm stuff
-.vagrant
-*.spk
+# hledger stuff
+#*.webmanual.md
+old
+.old
+/log
+*.log
+/profs/*
+/*.prof.*
+/tmp
+/bench*
 
-# recent stuff
-/site
-/commands
-/.obsidian
-/.github/workflows/README
+#/bin - see bin/.gitignore
+
+/examples
+#/examples/[1-9]*.journal
+
+/hledger/hledger.md
+/hledger-ui/hledger-ui.md
+/hledger-web/hledger-web.md
+/tools/generatejournal
+/tools/relnotes
+/tools/simplebench
+/tools/pandoc-demote-headers
+/tools/pandoc-drop-html-blocks
+/tools/pandoc-drop-html-inlines
+/tools/pandoc-drop-links
+/tools/pandoc-drop-notes
+/tools/pandoc-drop-toc
+/tools/generatetimeclock
+/hledger-lib/test/doctests
+/examples/edk-hledger-ui-mobile.gif
+/examples/tty-ui-1.gif
+/site/**
+!/site/src/*.md
+/finance
+/examples/demo/
+/doc/ghrelnotes.md
+/doc/.*
 /checks
-/headroom-templates
-.headroom.yaml
+/tools/docshelltest
+.latest.*
+.github/workflows/ci-arm.yml

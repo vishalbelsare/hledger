@@ -3,60 +3,52 @@
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# OPTIONS_GHC -Wno-incomplete-record-updates #-}
 
 module Hledger.UI.ErrorScreen
- (errorScreen
+ (esNew
+ ,esUpdate
+ ,esDraw
+ ,esHandle
  ,uiCheckBalanceAssertions
- ,uiReloadJournal
- ,uiReloadJournalIfChanged
+ ,uiReload
+ ,uiReloadIfFileChanged
+ ,uiToggleBalanceAssertions
  )
 where
 
 import Brick
 -- import Brick.Widgets.Border ("border")
-import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Data.Time.Calendar (Day)
 import Data.Void (Void)
 import Graphics.Vty (Event(..),Key(..),Modifier(..))
 import Lens.Micro ((^.))
+import Safe (headMay)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 
-import Hledger.Cli hiding (progname,prognameandversion)
+import Hledger.Cli hiding (mode, progname,prognameandversion)
 import Hledger.UI.UIOptions
 import Hledger.UI.UITypes
 import Hledger.UI.UIState
 import Hledger.UI.UIUtils
+import Hledger.UI.UIScreens
 import Hledger.UI.Editor
 
-errorScreen :: Screen
-errorScreen = ErrorScreen{
-   sInit    = esInit
-  ,sDraw    = esDraw
-  ,sHandle  = esHandle
-  ,esError  = ""
-  }
-
-esInit :: Day -> Bool -> UIState -> UIState
-esInit _ _ ui@UIState{aScreen=ErrorScreen{}} = ui
-esInit _ _ _ = error "init function called with wrong screen type, should not happen"  -- PARTIAL:
-
 esDraw :: UIState -> [Widget Name]
-esDraw UIState{aopts=UIOpts{uoCliOpts=copts}
-              ,aScreen=ErrorScreen{..}
+esDraw UIState{aScreen=ES ESS{..}
               ,aMode=mode
               } =
   case mode of
-    Help       -> [helpDialog copts, maincontent]
-    -- Minibuffer e -> [minibuffer e, maincontent]
+    Help       -> [helpDialog, maincontent]
     _          -> [maincontent]
   where
     maincontent = Widget Greedy Greedy $ do
-      render $ defaultLayout toplabel bottomlabel $ withAttr "error" $ str $ esError
+      render $ defaultLayout toplabel bottomlabel $ withAttr (attrName "error") $ str $ _essError
       where
         toplabel =
-              withAttr ("border" <> "bold") (str "Oops. Please fix this problem then press g to reload")
+              withAttr (attrName "border" <> attrName "bold") (str "Oops. Please fix this problem then press g to reload")
               -- <+> (if ignore_assertions_ copts then withAttr ("border" <> "query") (str " ignoring") else str " not ignoring")
 
         bottomlabel = quickhelp
@@ -72,46 +64,66 @@ esDraw UIState{aopts=UIOpts{uoCliOpts=copts}
               ,("q", "quit")
               ]
 
-esDraw _ = error "draw function called with wrong screen type, should not happen"  -- PARTIAL:
+esDraw _ = error' "draw function called with wrong screen type, should not happen"  -- PARTIAL:
 
-esHandle :: UIState -> BrickEvent Name AppEvent -> EventM Name (Next UIState)
-esHandle ui@UIState{aScreen=ErrorScreen{..}
-                   ,aopts=UIOpts{uoCliOpts=copts}
-                   ,ajournal=j
-                   ,aMode=mode
-                   }
-         ev =
-  case mode of
-    Help ->
-      case ev of
-        VtyEvent (EvKey (KChar 'q') []) -> halt ui
-        VtyEvent (EvKey (KChar 'l') [MCtrl]) -> redraw ui
-        VtyEvent (EvKey (KChar 'z') [MCtrl]) -> suspend ui
-        _                    -> helpHandle ui ev
+esHandle :: BrickEvent Name AppEvent -> EventM Name UIState ()
+esHandle ev = do
+  ui0 <- get'
+  case ui0 of
+    ui@UIState{aScreen=ES ESS{..}
+              ,aopts=UIOpts{uoCliOpts=copts}
+              ,ajournal=j
+              ,aMode=mode
+              } ->
+      case mode of
+        Help ->
+          case ev of
+            VtyEvent (EvKey (KChar 'q') []) -> halt
+            VtyEvent (EvKey (KChar 'l') [MCtrl]) -> redraw
+            VtyEvent (EvKey (KChar 'z') [MCtrl]) -> suspend ui
+            _                    -> helpHandle ev
 
-    _ -> do
-      let d = copts^.rsDay
-      case ev of
-        VtyEvent (EvKey (KChar 'q') []) -> halt ui
-        VtyEvent (EvKey KEsc        []) -> continue $ uiCheckBalanceAssertions d $ resetScreens d ui
-        VtyEvent (EvKey (KChar c)   []) | c `elem` ['h','?'] -> continue $ setMode Help ui
-        VtyEvent (EvKey (KChar 'E') []) -> suspendAndResume $ void (runEditor pos f) >> uiReloadJournalIfChanged copts d j (popScreen ui)
-          where
-            (pos,f) = case parsewithString hledgerparseerrorpositionp esError of
-                        Right (f,l,c) -> (Just (l, Just c),f)
-                        Left  _       -> (endPosition, journalFilePath j)
-        e | e `elem` [VtyEvent (EvKey (KChar 'g') []), AppEvent FileChange] ->
-          liftIO (uiReloadJournal copts d (popScreen ui)) >>= continue . uiCheckBalanceAssertions d
---           (ej, _) <- liftIO $ journalReloadIfChanged copts d j
---           case ej of
---             Left err -> continue ui{aScreen=s{esError=err}} -- show latest parse error
---             Right j' -> continue $ regenerateScreens j' d $ popScreen ui  -- return to previous screen, and reload it
-        VtyEvent (EvKey (KChar 'I') []) -> continue $ uiCheckBalanceAssertions d (popScreen $ toggleIgnoreBalanceAssertions ui)
-        VtyEvent (EvKey (KChar 'l') [MCtrl]) -> redraw ui
-        VtyEvent (EvKey (KChar 'z') [MCtrl]) -> suspend ui
-        _ -> continue ui
+        _ -> do
+          d <- liftIO getCurrentDay
+          case ev of
+            VtyEvent (EvKey (KChar 'q') []) -> halt
+            VtyEvent (EvKey KEsc        []) -> put' $ uiCheckBalanceAssertions d $ resetScreens d ui
+            VtyEvent (EvKey (KChar c)   []) | c `elem` ['h','?'] -> put' $ setMode Help ui
 
-esHandle _ _ = error "event handler called with wrong screen type, should not happen"  -- PARTIAL:
+            -- g or file change: reload the journal and rebuild app state.
+            e | e `elem` [VtyEvent (EvKey (KChar 'g') []), AppEvent FileChange] -> esReload copts d ui
+
+            -- E: run editor, reload the journal.
+            VtyEvent (EvKey (KChar 'E') []) -> do
+              suspendAndResume' $ do
+                let
+                  (pos,f) = case parsewithString hledgerparseerrorpositionp _essError of
+                              Right (f',l,c) -> (Just (l, Just c),f')
+                              Left  _       -> (endPosition, journalFilePath j)
+                runEditor pos f
+              esReloadIfFileChanged copts d j ui
+
+            VtyEvent (EvKey (KChar 'I') []) -> uiToggleBalanceAssertions d (popScreen ui)
+            VtyEvent (EvKey (KChar 'l') [MCtrl]) -> redraw
+            VtyEvent (EvKey (KChar 'z') [MCtrl]) -> suspend ui
+            _ -> return ()
+
+    _ -> errorWrongScreenType "esHandle"
+
+    where
+      -- Reload and fully regenerate the error screen.
+      -- XXX On an error screen below the transaction screen, this is tricky because of a current limitation of regenerateScreens.
+      -- For now we try to work around by re-entering the transaction screen.
+      -- This can show flicker in the UI and it's hard to handle all situations robustly.
+      esReload copts d ui = uiReload copts d ui >>= maybeReloadErrorScreen copts d
+      esReloadIfFileChanged copts d j ui = liftIO (uiReloadIfFileChanged copts d j ui) >>= maybeReloadErrorScreen copts d
+      maybeReloadErrorScreen copts d ui =
+        case headMay $ aPrevScreens ui of
+          Just (TS _) -> do
+            -- check balance assertions, exit to register screen, enter transaction screen, reload once more
+            put' $ popScreen $ popScreen $ uiCheckBalanceAssertions d ui
+            sendVtyEvents [EvKey KEnter [], EvKey (KChar 'g') []]  -- XXX Might be disrupted if other events are queued ?
+          _ -> uiReload copts d (popScreen ui) >>= put' . uiCheckBalanceAssertions d
 
 -- | Parse the file name, line and column number from a hledger parse error message, if possible.
 -- Temporary, we should keep the original parse error location. XXX
@@ -137,57 +149,85 @@ hledgerparseerrorpositionp = do
       ]
 
 
--- | Unconditionally reload the journal, regenerating the current screen
--- and all previous screens in the history as of the provided today-date.
--- If reloading fails, enter the error screen, or if we're already
--- on the error screen, update the error displayed.
--- Defined here so it can reference the error screen.
+-- Defined here so it can reference the error screen:
+
+-- | Modify some input options for hledger-ui (enable --forecast).
+uiAdjustOpts :: UIOpts -> CliOpts -> CliOpts
+uiAdjustOpts uopts = enableForecast uopts
+
+-- | Reload the journal from its input files, then update the ui app state accordingly.
+-- This means regenerate the entire screen stack from top level down to the current screen, using the provided today-date.
+-- As a convenience (usually), if journal reloading fails, this enters the error screen, or if already there, updates its message.
 --
--- The provided CliOpts are used for reloading, and then saved in the
--- UIState if reloading is successful (otherwise the UIState keeps its old
--- CliOpts.) (XXX needed for.. ?)
+-- The provided cli options can influence reloading; then if reloading succeeds they are saved in the ui state,
+-- otherwise the UIState keeps its old options. (XXX needed for.. ?)
 --
--- Forecasted transactions are always generated, as at hledger-ui startup.
--- If a forecast period is specified in the provided opts, or was specified
--- at startup, it is preserved.
+-- Like at hledger-ui startup, --forecast is always enabled.
+-- A forecast period specified in the provided opts, or at startup, is preserved.
 --
-uiReloadJournal :: CliOpts -> Day -> UIState -> IO UIState
-uiReloadJournal copts d ui = do
+uiReload :: CliOpts -> Day -> UIState -> EventM Name UIState UIState
+uiReload copts d ui = liftIO $ do
   ej <-
-    let copts' = enableForecastPreservingPeriod ui copts
-    in journalReload copts'
+    let copts1 = uiAdjustOpts (astartupopts ui) copts
+    in runExceptT $ journalTransform copts1 <$> journalReload copts1
+  -- dbg1IO "uiReload before reload" (map tdescription $ jtxns $ ajournal ui)
   return $ case ej of
-    Right j  -> regenerateScreens j d ui
+    Right j  ->
+      -- dbg1 "uiReload after reload" (map tdescription $ jtxns j) $
+      regenerateScreens j d ui
     Left err ->
       case ui of
-        UIState{aScreen=s@ErrorScreen{}} -> ui{aScreen=s{esError=err}}
-        _                                -> screenEnter d errorScreen{esError=err} ui
+        UIState{aScreen=ES _} -> ui{aScreen=esNew err}
+        _                      -> pushScreen (esNew err) ui
+      -- XXX GHC 9.2 warning:
+      -- hledger-ui/Hledger/UI/ErrorScreen.hs:164:59: warning: [-Wincomplete-record-updates]
+      --     Pattern match(es) are non-exhaustive
+      --     In a record-update construct:
+      --         Patterns of type ‘Screen’ not matched:
+      --             AccountsScreen _ _ _ _ _
+      --             RegisterScreen _ _ _ _ _ _
+      --             TransactionScreen _ _ _ _ _ _
 
--- | Like uiReloadJournal, but does not re-parse the journal if the file(s)
--- have not changed since last loaded. Always regenerates the screens though,
--- since the provided options or today-date may have changed.
-uiReloadJournalIfChanged :: CliOpts -> Day -> Journal -> UIState -> IO UIState
-uiReloadJournalIfChanged copts d j ui = do
-  (ej, _changed) <-
-    let copts' = enableForecastPreservingPeriod ui copts
-    in journalReloadIfChanged copts' d j
+-- | Like uiReload, except it skips re-reading the journal if its file(s) have not changed
+-- since it was last loaded. The up app state is always updated, since the options or today-date may have changed.
+-- Also, this one runs in IO, suitable for suspendAndResume.
+uiReloadIfFileChanged :: CliOpts -> Day -> Journal -> UIState -> IO UIState
+uiReloadIfFileChanged copts d j ui = do
+  ej <-
+    let copts1 = uiAdjustOpts (astartupopts ui) copts
+    in runExceptT $ journalReloadIfChanged copts1 d j
   return $ case ej of
-    Right j' -> regenerateScreens j' d ui
-    Left err ->
-      case ui of
-        UIState{aScreen=s@ErrorScreen{}} -> ui{aScreen=s{esError=err}}
-        _                                -> screenEnter d errorScreen{esError=err} ui
+    Right (j', _) -> regenerateScreens j' d ui
+    Left err -> case aScreen ui of
+        ES _ -> ui{aScreen=esNew err}
+        _    -> pushScreen (esNew err) ui
 
--- Re-check any balance assertions in the current journal, and if any
--- fail, enter (or update) the error screen. Or if balance assertions
--- are disabled, do nothing.
+-- Re-check any balance assertions in the current journal,
+-- and if any fail, enter (or update) the error screen.
+-- Or if balance assertions are disabled or pivot is active, do nothing.
+-- (When pivot is active, assertions have already been checked on the pre-pivot journal,
+-- and the current post-pivot journal's account names don't match the original assertions.)
 uiCheckBalanceAssertions :: Day -> UIState -> UIState
-uiCheckBalanceAssertions d ui@UIState{ajournal=j}
-  | ui^.ignore_assertions = ui
+uiCheckBalanceAssertions _d ui@UIState{ajournal=j, aopts=UIOpts{uoCliOpts=CliOpts{inputopts_=InputOpts{pivot_=pval}}}}
+  | ui^.ignore_assertions = ui        -- user disabled checks
+  | not (null pval) = ui              -- post-pivot journal, assertions already checked pre-pivot
   | otherwise =
     case journalCheckBalanceAssertions j of
-      Nothing  -> ui
-      Just err ->
+      Right () -> ui
+      Left err ->
         case ui of
-          UIState{aScreen=s@ErrorScreen{}} -> ui{aScreen=s{esError=err}}
-          _                                -> screenEnter d errorScreen{esError=err} ui
+          UIState{aScreen=ES sst} -> ui{aScreen=ES sst{_essError=err}}
+          _                        -> pushScreen (esNew err) ui
+
+-- | Toggle ignoring balance assertions (when user presses I), and if no longer ignoring, recheck them.
+-- Normally the recheck is done quickly on the in-memory journal.
+-- But if --pivot is active, a full journal reload is done instead
+-- (because we can't check balance assertions after pivoting has occurred).
+-- In that case, this operation could be slower and could reveal other data changes (not just balance assertion failures).
+uiToggleBalanceAssertions :: Day -> UIState -> EventM Name UIState ()
+uiToggleBalanceAssertions d ui@UIState{aopts=UIOpts{uoCliOpts=copts@CliOpts{inputopts_=InputOpts{pivot_=pivotval}}}} =
+  let ui' = toggleIgnoreBalanceAssertions ui
+  in case (ui'^.ignore_assertions, null pivotval) of
+    (True, _)      -> put' ui'                                -- ignoring enabled, no check needed
+    (False, True)  -> put' $ uiCheckBalanceAssertions d ui'   -- unpivoted journal, can check in memory
+    (False, False) -> uiReload copts d ui' >>= put'           -- pivoted journal, must reload to check it

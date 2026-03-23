@@ -1,3 +1,5 @@
+# * auto posting rules
+
 <
 = ^income
   (liabilities:tax)  *.33  ; income tax
@@ -11,9 +13,11 @@
     assets:cash             $20
     assets:bank
 
-# 1. print. Auto-generated postings are inserted below the matched one.
-$ hledger print -f- --auto
-2016-01-01 paycheck  ; modified:
+# ** 1. print. Auto-generated postings are inserted below the matched one.
+# With --verbose-tags, informative tags will also be added.
+$ hledger print -f- --auto --verbose-tags
+2016-01-01 paycheck
+    ; modified-transaction: 
     income:remuneration           $-100
     (liabilities:tax)              $-33  ; income tax, generated-posting: = ^income
     income:donations               $-15
@@ -26,7 +30,7 @@ $ hledger print -f- --auto
 
 >=
 
-# 2. register
+# ** 2. register
 $ hledger register -f- --auto
 2016-01-01 paycheck             income:remuneration          $-100         $-100
                                 (liabilities:tax)             $-33         $-133
@@ -37,7 +41,7 @@ $ hledger register -f- --auto
                                 assets:bank                   $-20          $-38
 >=
 
-# 3. balance
+# ** 3. balance
 $ hledger balance -f- --auto --tree
                 $115  assets
                  $95    bank
@@ -59,7 +63,7 @@ $ hledger balance -f- --auto --tree
   (trigger)   1
   (target)    1    = 11  ; this assertion would not fail, auto posting will be taken into account
 
-# 4.
+# ** 4.
 $ hledger register -f- --auto
 2018-01-01                      (trigger)                        1             1
                                 (target)                        10            11
@@ -76,12 +80,12 @@ $ hledger register -f- --auto
     expenses:groceries:food
     assets:bank:checking                         $-20
 
-# 5.
+# ** 5.
 $ hledger print -f- --auto
-2018-10-07 * MARKET  ; modified:
+2018-10-07 * MARKET
     expenses:groceries:food
-    [budget:groceries]                 $-20  ; generated-posting: = ^expenses:groceries
-    [assets:bank:checking]              $20  ; generated-posting: = ^expenses:groceries
+    [budget:groceries]                 $-20
+    [assets:bank:checking]              $20
     assets:bank:checking               $-20
 
 >=
@@ -95,12 +99,12 @@ $ hledger print -f- --auto
 2018/1/1
     (assets:billable:client1)         0.50h @ $90
 
-# 6.
+# ** 6.
 $ hledger -f- print --auto -x
-2018-01-01  ; modified:
+2018-01-01
     (assets:billable:client1)     0.50h @ $90
-    assets:receivable:client1    50.00h @ $90  ; generated-posting: = assets:billable:client1
-    revenues:client1                   $-4500  ; generated-posting: = assets:billable:client1
+    assets:receivable:client1    50.00h @ $90
+    revenues:client1                   $-4500
 
 >=
 
@@ -113,12 +117,12 @@ $ hledger -f- print --auto -x
 2018/1/1
     (assets:billable:client1)         0.50h
 
-# 7.
+# ** 7.
 $ hledger -f- print --auto -x
-2018-01-01  ; modified:
+2018-01-01
     (assets:billable:client1)           0.50h
-    assets:receivable:client1             $50  ; generated-posting: = assets:billable:client1
-    revenues:client1                     $-50  ; generated-posting: = assets:billable:client1
+    assets:receivable:client1             $50
+    revenues:client1                     $-50
 
 >=
 
@@ -131,12 +135,12 @@ $ hledger -f- print --auto -x
 2018/1/1
     (assets:billable:client1)         0.50h @ $90
 
-# 8.
+# ** 8.
 $ hledger -f- print --auto -x
-2018-01-01  ; modified:
+2018-01-01
     (assets:billable:client1)                       0.50h @ $90
-    assets:receivable:client1    0.50 "Client1 Hours" @ $100.00  ; generated-posting: = assets:billable:client1
-    revenues:client1                                    $-50.00  ; generated-posting: = assets:billable:client1
+    assets:receivable:client1    0.50 "Client1 Hours" @ $100.00
+    revenues:client1                                    $-50.00
 
 >=
 
@@ -158,9 +162,9 @@ $ hledger -f- print --auto -x
     budget:other
     budget:available                              =$0
 
-# 9.
+# ** 9.
 $ hledger print -f- --auto
->2 /cannot be used with accounts which are/
+>2 /Balance assignments and auto postings may not be combined/
 >=1
 
 
@@ -176,9 +180,10 @@ $ hledger print -f- --auto
     Expenses:Joint:Widgets                                   $100.00 @ £0.50
     Assets:Joint:Bank                                        -£50.00
 
-# 10.
-$ hledger -f- print --auto
-2018-01-01  ; modified:
+# ** 10.
+$ hledger -f- print --auto --verbose-tags
+2018-01-01
+    ; modified-transaction: 
     Expenses:Joint:Widgets     $100.00 @ £0.50
     Expenses:Joint            $-100.00 @ £0.50  ; generated-posting: = ^Expenses:Joint
     Liabilities:Joint:Bob       $50.00 @ £0.50  ; generated-posting: = ^Expenses:Joint
@@ -198,13 +203,13 @@ $ hledger -f- print --auto
     Expenses:Joint:Widgets                                   $100.00 @@ £50
     Assets:Joint:Bank                                        -£50.00
 
-# 11.
+# ** 11.
 $ hledger -f- print --auto
-2018-01-01  ; modified:
+2018-01-01
     Expenses:Joint:Widgets     $100.00 @@ £50
-    Expenses:Joint            $-100.00 @@ £50  ; generated-posting: = ^Expenses:Joint
-    Liabilities:Joint:Bob       $50.00 @@ £25  ; generated-posting: = ^Expenses:Joint
-    Liabilities:Joint:Bill      $50.00 @@ £25  ; generated-posting: = ^Expenses:Joint
+    Expenses:Joint            $-100.00 @@ £50
+    Liabilities:Joint:Bob       $50.00 @@ £25
+    Liabilities:Joint:Bill      $50.00 @@ £25
     Assets:Joint:Bank                 £-50.00
 
 >=0
@@ -227,13 +232,13 @@ $ hledger -f- print --auto
     Expenses:Joint:Widgets                                   $100.00
     Assets:Joint:Bank                                        -£50.00
 
-# 12.
+# ** 12.
 $ hledger -f- print --auto
-2018-01-01  ; modified:
+2018-01-01
     Expenses:Joint:Widgets               $100.00
-    Expenses:Joint            $-100.00 @@ £50.00  ; generated-posting: = ^Expenses:Joint
-    Liabilities:Joint:Bob       $50.00 @@ £25.00  ; generated-posting: = ^Expenses:Joint
-    Liabilities:Joint:Bill      $50.00 @@ £25.00  ; generated-posting: = ^Expenses:Joint
+    Expenses:Joint            $-100.00 @@ £50.00
+    Liabilities:Joint:Bob       $50.00 @@ £25.00
+    Liabilities:Joint:Bill      $50.00 @@ £25.00
     Assets:Joint:Bank                    £-50.00
 
 >=0
@@ -255,30 +260,28 @@ $ hledger -f- print --auto
     assets:cash             $20
     assets:bank
 
-# 13.
+# ** 13.
 $ hledger print -f- --auto --forecast -b 2016-01 -e 2016-03
 2016-01-03 withdraw
     assets:cash             $20
     assets:bank
 
 2016-02-01 paycheck
-    ; generated-transaction: ~ monthly from 2016-01, modified: 
     income:remuneration           $-100
-    (liabilities:tax)              $-33  ; income tax, generated-posting: = ^income
+    (liabilities:tax)              $-33  ; income tax
     income:donations               $-15
-    (liabilities:tax)            $-4.95  ; income tax, generated-posting: = ^income
+    (liabilities:tax)            $-4.95  ; income tax
     assets:bank
 
 >=
 
-# 14. and they don't force --auto on
+# ** 14. and they don't force --auto on
 $ hledger print -f- --forecast -b 2016-01 -e 2016-03
 2016-01-03 withdraw
     assets:cash             $20
     assets:bank
 
 2016-02-01 paycheck
-    ; generated-transaction: ~ monthly from 2016-01
     income:remuneration           $-100
     income:donations               $-15
     assets:bank
@@ -295,7 +298,7 @@ $ hledger print -f- --forecast -b 2016-01 -e 2016-03
     expenses:groceries:food
     assets:bank:checking                         $-20
 
-# 15.
+# ** 15.
 $ hledger -f- register --auto
 2020-10-07 MARKET               ex:groceries:food              $20           $20
                                 [budget:groceries]            $-20             0
@@ -312,7 +315,7 @@ $ hledger -f- register --auto
   a    EUR -10.00  ; :tax20:
   b    EUR 12.00
 
-# 16. Transaction balancing sees auto postings ?
+# ** 16. Transaction balancing sees auto postings ?
 # $ hledger -f- print -x --auto
 # 2018-12-18
 #     a          EUR -10.00  ; :tax20:
@@ -321,12 +324,12 @@ $ hledger -f- register --auto
 #
 # >=
 
-# 16. No, transaction must be balanced both with and without auto postings.
+# ** 16. No, transaction must be balanced both with and without auto postings.
 $ hledger -f- print -x --auto
->2 /could not balance/
+>2 /unbalanced/
 >=1
 
-# 17. Commodity display styles are applied to auto posting amounts.
+# ** 17. Commodity display styles are applied to auto posting amounts.
 <
 2020-01-20
   (a)    1 A
@@ -337,13 +340,13 @@ $ hledger -f- print -x --auto
 commodity 0. B
 
 $ hledger -f- print --auto
-2020-01-20  ; modified:
+2020-01-20
     (a)             1 A
-    (b)           1.5 B  ; generated-posting: =
+    (b)           1.5 B
 
 >=0
 
-# 18. Auto-generated postings with currency matching only matches amounts with that currency in an auto posting (#1582)
+# ** 18. Auto-generated postings with currency matching only matches amounts with that currency in an auto posting (#1582)
 <
 = assets cur:USD
   (b:USD)  *1
@@ -357,16 +360,16 @@ $ hledger -f- print --auto
   assets
 
 $ hledger -f- print --auto
-2017-12-14  ; modified:
+2017-12-14
     revenue:job         -10 EUR
     revenue:job         -10 USD
     assets
-    (b:USD)               5 USD  ; generated-posting: = assets cur:EUR
-    (b:USD)              10 USD  ; generated-posting: = assets cur:USD
+    (b:USD)               5 USD
+    (b:USD)              10 USD
 
 >=0
 
-# 19. Auto-generated postings match only the amounts which match amount query.
+# ** 19. Auto-generated postings match only the amounts which match amount query.
 <
 = assets amt:>50
   (b)  *1
@@ -377,15 +380,15 @@ $ hledger -f- print --auto
   assets
 
 $ hledger -f- print --auto
-2017-12-14  ; modified:
+2017-12-14
     revenue:job         -10 USD
     revenue:job        -100 EUR
     assets
-    (b)                 100 EUR  ; generated-posting: = assets amt:>50
+    (b)                 100 EUR
 
 >=0
 
-# 20. Auto-generated postings apply on auto-balanced periodic postings.
+# ** 20. Auto-generated postings apply on auto-balanced periodic postings.
 <
 2021-01-01   Fixed
     Checking            -10
@@ -399,15 +402,46 @@ $ hledger -f- print --auto
     (Auto)     *1
 
 $ hledger -f- print --forecast --auto --explicit
-2021-01-01 Fixed  ; modified:
+2021-01-01 Fixed
     Checking             -10
     Costs                 10
-    (Auto)                10  ; generated-posting: = acct:Costs
+    (Auto)                10
 
 2021-01-02 Periodic
-    ; generated-transaction: ~ 2021-01-02, modified: 
     Checking             -10
     Costs                 10
-    (Auto)                10  ; generated-posting: = acct:Costs
+    (Auto)                10
+
+>=0
+
+# ** 21. Redundant costs are still detected properly with --auto. (#2110)
+<
+2023-01-01
+    assets:shares        1 TEST @ 50.00€
+    equity:conversion   -1 TEST
+    equity:conversion   50.00€
+    equity:opening     -50.00€
+
+= foo
+    a   1
+
+$ hledger -f- --auto check
+
+# 22. any instance of %account in the account name is substituted for the original account
+<
+2023-01-06 * A client
+    Income:Revenue  -1190 €  ; tax: 19%
+    Assets:Bank
+
+= acct:Income tag:tax=19%
+    %account              *-0.15966387 ; 1-100/119
+    Liabilities:VAT        *0.15966387 ; 1-100/119
+
+$ hledger -f- --auto print
+2023-01-06 * A client
+    Income:Revenue            -1190 €  ; tax: 19%
+    Income:Revenue      190.0000053 €  ; 1-100/119
+    Liabilities:VAT    -190.0000053 €  ; 1-100/119
+    Assets:Bank
 
 >=0

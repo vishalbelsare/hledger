@@ -49,6 +49,9 @@ import Hledger.Reports.ReportTypes
 type BalanceReport = ([BalanceReportItem], MixedAmount)
 type BalanceReportItem = (AccountName, AccountName, Int, MixedAmount)
 
+instance HasAmounts BalanceReportItem where
+  styleAmounts styles (a,b,c,d) = (a,b,c,styleAmounts styles d)
+
 -- | When true (the default), this makes balance --flat reports and their implementation clearer.
 -- Single/multi-col balance reports currently aren't all correct if this is false.
 flatShowsExclusiveBalance    = True
@@ -68,7 +71,7 @@ balanceReport rspec j = (rows, total)
     report = multiBalanceReport rspec j
     rows = [( prrFullName row
             , prrDisplayName row
-            , prrDepth row - 1  -- BalanceReport uses 0-based account depths
+            , prrIndent row
             , prrTotal row
             ) | row <- prRows report]
     total = prrTotal $ prTotals report
@@ -82,7 +85,7 @@ Right samplejournal2 =
       jtxns = [
         txnTieKnot Transaction{
           tindex=0,
-          tsourcepos=nullsourcepos,
+          tsourcepos=nullsourcepospair,
           tdate=fromGregorian 2008 01 01,
           tdate2=Just $ fromGregorian 2009 01 01,
           tstatus=Unmarked,
@@ -146,7 +149,7 @@ tests_BalanceReport = testGroup "BalanceReport" [
        mixedAmount (usd 0))
 
     ,testCase "with --depth=N" $
-     (defreportspec{_rsReportOpts=defreportopts{depth_=Just 1}}, samplejournal) `gives`
+     (defreportspec{_rsReportOpts=defreportopts{depth_=DepthSpec (Just 1) []}}, samplejournal) `gives`
       ([
        ("expenses",    "expenses",     0, mixedAmount (usd 2))
        ,("income",      "income",      0, mixedAmount (usd (-2)))
@@ -162,11 +165,11 @@ tests_BalanceReport = testGroup "BalanceReport" [
        mixedAmount (usd 0))
 
     ,testCase "with date:" $
-     (defreportspec{_rsQuery=Date $ DateSpan (Just $ fromGregorian 2009 01 01) (Just $ fromGregorian 2010 01 01)}, samplejournal2) `gives`
+     (defreportspec{_rsQuery=Date $ DateSpan (Just $ Exact $ fromGregorian 2009 01 01) (Just $ Exact $ fromGregorian 2010 01 01)}, samplejournal2) `gives`
       ([], nullmixedamt)
 
     ,testCase "with date2:" $
-     (defreportspec{_rsQuery=Date2 $ DateSpan (Just $ fromGregorian 2009 01 01) (Just $ fromGregorian 2010 01 01)}, samplejournal2) `gives`
+     (defreportspec{_rsQuery=Date2 $ DateSpan (Just $ Exact $ fromGregorian 2009 01 01) (Just $ Exact $ fromGregorian 2010 01 01)}, samplejournal2) `gives`
       ([
         ("assets:bank:checking","assets:bank:checking",0,mixedAmount (usd 1))
        ,("income:salary","income:salary",0,mixedAmount (usd (-1)))
@@ -219,7 +222,7 @@ tests_BalanceReport = testGroup "BalanceReport" [
        ]
 
       ,testCase "accounts report with account pattern o and --depth 1" ~:
-       defreportopts{patterns_=["o"],depth_=Just 1} `gives`
+       defreportopts{patterns_=["o"],depth_=(Just 1, [])} `gives`
        ["                  $1  expenses"
        ,"                 $-2  income"
        ,"--------------------"
@@ -313,7 +316,7 @@ tests_BalanceReport = testGroup "BalanceReport" [
                 ,"  a:b          10h @ $50"
                 ,"  c:d                   "
                 ]) >>= either error' return
-         let j' = journalCanonicaliseAmounts $ journalToCost j -- enable cost basis adjustment
+         let j' = journalCanonicaliseAmounts $ journalToCost ToCost j -- enable cost basis adjustment
          balanceReportAsText defreportopts (balanceReport defreportopts Any j') `is`
            ["                $500  a:b"
            ,"               $-500  c:d"

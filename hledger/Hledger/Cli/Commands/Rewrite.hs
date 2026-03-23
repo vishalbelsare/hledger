@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -11,17 +12,20 @@ module Hledger.Cli.Commands.Rewrite (
 where
 
 import Data.Functor.Identity
-import Data.List (sortOn, foldl')
+import Data.List (sortOn)
+#if !MIN_VERSION_base(4,20,0)
+import Data.List (foldl')
+#endif
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
 import Hledger
 import Hledger.Cli.CliOptions
 import Hledger.Cli.Commands.Print
 import System.Console.CmdArgs.Explicit
 import Text.Printf
-import Text.Megaparsec
-import qualified Data.Algorithm.Diff as D
+import Text.Megaparsec hiding (pos1)
+import Data.Algorithm.Diff qualified as D
 
 rewritemode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Rewrite.txt")
@@ -29,7 +33,7 @@ rewritemode = hledgerCommandMode
            "add a posting to ACCT, which may be parenthesised. AMTEXPR is either a literal amount, or *N which means the transaction's first matched amount multiplied by N (a decimal number). Two spaces separate ACCT and AMTEXPR."
   ,flagNone ["diff"] (setboolopt "diff") "generate diff suitable as an input for patch tool"
   ]
-  [generalflagsgroup1]
+  cligeneralflagsgroups1
   hiddenflags
   ([], Just $ argsFlag "[QUERY] --add-posting \"ACCT  AMTEXPR\" ...")
 
@@ -39,9 +43,11 @@ rewritemode = hledgerCommandMode
 
 rewrite opts@CliOpts{rawopts_=rawopts,reportspec_=rspec} j@Journal{jtxns=ts} = do
   -- rewrite matched transactions
-  let today = _rsDay rspec
-  let modifiers = transactionModifierFromOpts opts : jtxnmodifiers j
-  let j' = j{jtxns=either error' id $ modifyTransactions mempty today modifiers ts}  -- PARTIAL:
+  let
+    today = _rsDay rspec
+    verbosetags = boolopt "verbose-tags" rawopts
+    modifiers = transactionModifierFromOpts opts : jtxnmodifiers j
+  let j' = j{jtxns=either error' id $ modifyTransactions (journalAccountType j) (journalInheritedAccountTags j) mempty today verbosetags modifiers ts}  -- PARTIAL:
   -- run the print command, showing all transactions, or show diffs
   printOrDiff rawopts opts{reportspec_=rspec{_rsQuery=Any}} j j'
 
@@ -65,7 +71,7 @@ printOrDiff opts
 
 diffOutput :: Journal -> Journal -> IO ()
 diffOutput j j' = do
-    let changed = [(originalTransaction t, originalTransaction t') | (t, t') <- zip (jtxns j) (jtxns j'), t /= t']
+    let changed = [(transactionWithMostlyOriginalPostings t, transactionWithMostlyOriginalPostings t') | (t, t') <- zip (jtxns j) (jtxns j'), t /= t']
     T.putStr $ renderPatch $ map (uncurry $ diffTxn j) changed
 
 type Chunk = (SourcePos, [DiffLine Text])
@@ -101,11 +107,11 @@ renderPatch = go Nothing . sortOn fst where
     go _ [] = ""
     go Nothing cs@((SourcePos fp _ _, _):_) = fileHeader fp <> go (Just (fp, 0)) cs
     go (Just (fp, _)) cs@((SourcePos fp' _ _, _):_) | fp /= fp' = go Nothing cs
-    go (Just (fp, offs)) ((SourcePos _ lineno _, diffs):cs) = chunkHeader <> chunk <> go (Just (fp, offs + adds - dels)) cs
+    go (Just (fp, offs)) ((SourcePos _ lineno _, diffs):cs) = chunkHeader <> chnk <> go (Just (fp, offs + adds - dels)) cs
         where
             chunkHeader = T.pack $ printf "@@ -%d,%d +%d,%d @@\n" (unPos lineno) dels (unPos lineno+offs) adds
             (dels, adds) = foldl' countDiff (0, 0) diffs
-            chunk = foldMap renderLine diffs
+            chnk = foldMap renderLine diffs
     fileHeader fp = "--- " <> T.pack fp <> "\n+++ " <> T.pack fp <> "\n"
 
     countDiff (dels, adds) = \case

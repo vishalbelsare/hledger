@@ -1,0 +1,147 @@
+# TRIGGER: Runs on any push to binaries-windows-arm64 or binaries branches.
+# ACTION: Builds, unit-tests and saves windows arm64 binaries with stack and the default ghc.
+# XXX There's no windows ARM version of stack yet; the preinstalled stack,
+# the one installed by ghcup, and the one installed by stack's installer are all x86_64.
+# So currently this workflow just builds x86_64 hledger binaries, and is pointless.
+
+name: binaries-windows-arm64
+on:
+  push:
+    branches: [ binaries-windows-arm64 ] # binaries
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-11-arm
+      # arch:  arm64
+      # image: https://github.com/actions/partner-runner-images/blob/main/images/arm-windows-11-image.md
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+
+    - name: Check out
+      uses: actions/checkout@v4
+      # have to fetch everything for git describe for --version
+      with: 
+        fetch-depth: 0
+
+    # caching
+
+    # XXX Warning: Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.
+    - name: Cache - stack programs dir   # ghc, ghc-included packages and their haddocks, mingw, msys2
+      id:   stack-programs-dir
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\AppData\Local\Programs\stack\
+        # which files signal a change in stack's global db ?
+        # **.yaml includes */package.yaml and stack.yaml* (too many), and hopefully no other changing yamls
+        key: ${{ runner.os }}-appdata-local-programs-stack-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-appdata-local-programs-stack
+
+    - name: Cache - stack global dir
+      id:   stack-global-package-db
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\AppData\Roaming\stack\
+        key: ${{ runner.os }}-appdata-roaming-stack-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-appdata-roaming-stack
+
+    - name: Cache - ./.stack-work
+      uses: actions/cache@v4
+      with:
+        path: .stack-work
+        key: ${{ runner.os }}-stack-work-${{ hashFiles('**.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-stack-work
+
+    - name: Cache - hledger-lib/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-lib/.stack-work
+        key: ${{ runner.os }}-hledger-lib-stack-work-${{ hashFiles('hledger-lib/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-hledger-lib-stack-work
+
+    - name: Cache - hledger/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger/.stack-work
+        key: ${{ runner.os }}-hledger-stack-work-${{ hashFiles('hledger/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-hledger-stack-work
+
+    - name: Cache - hledger-ui/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-ui/.stack-work
+        key: ${{ runner.os }}-hledger-ui-stack-work-${{ hashFiles('hledger-ui/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-hledger-ui-stack-work
+
+    - name: Cache - hledger-web/.stack-work
+      uses: actions/cache@v4
+      with:
+        path: hledger-web/.stack-work
+        key: ${{ runner.os }}-hledger-web-stack-work-${{ hashFiles('hledger-web/package.yaml') }}
+        restore-keys: |
+             ${{ runner.os }}-hledger-web-stack-work
+
+    # actions
+
+    - name: Install haskell tools if needed
+      # if: steps.stack-programs-dir.outputs.cache-hit != 'true'
+      # set PATH=C:\Users\runneradmin\AppData\Local\Programs\stack\local\bin;%PATH%
+      run: |
+        stack setup --install-ghc
+
+    - name: Install haskell deps
+      run: |
+        stack build --test --only-dependencies --dry-run
+        stack build --test --only-dependencies
+
+    - name: Build all hledger modules warning free, optimised and minimised
+      run: |
+        stack install --test --force-dirty --ghc-options=-fforce-recomp --ghc-options=-Werror
+      # --ghc-options=-split-sections doesn't work on windows, "too many sections"
+      # --pedantic
+
+    # - name: Install shelltestrunner
+    ## - export PATH=~/.local/bin:$PATH
+    # - if [[ ! -x ~/.local/bin/shelltest ]]; then stack install shelltestrunner-1.11; fi
+    # - shelltest --version
+
+    # run hledger-lib/hledger functional tests, skipping the ones for addons
+    ## - export PATH=~/.local/bin:$PATH
+    #- COLUMNS=80 stack exec -- shelltest --execdir -j16 hledger/test -x /_ -x /addons -x ledger-compat/ledger-baseline -x ledger-compat/ledger-regress -x ledger-compat/ledger-collected
+
+    # artifacts:
+
+    - name: Gather binaries
+      run: |
+        mkdir tmp
+        cp /C/Users/runneradmin/AppData/Roaming/local/bin/hledger.exe tmp
+        cp /C/Users/runneradmin/AppData/Roaming/local/bin/hledger-ui.exe tmp
+        cp /C/Users/runneradmin/AppData/Roaming/local/bin/hledger-web.exe tmp
+        strip tmp/hledger.exe
+        strip tmp/hledger-ui.exe
+        strip tmp/hledger-web.exe
+        tmp/hledger --version
+        tmp/hledger-ui --version
+        tmp/hledger-web --version
+      # Guessing these are not likely to be used on windows.
+      # cp hledger/embeddedfiles/*.1 tmp
+      # cp hledger/embeddedfiles/*.info tmp
+      # cp hledger/shell-completion/hledger-completion.bash tmp
+             
+    - name: Create binaries artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: hledger-windows-arm64
+        path: |
+          tmp/hledger.exe
+          tmp/hledger-ui.exe
+          tmp/hledger-web.exe

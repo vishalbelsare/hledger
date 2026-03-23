@@ -1,7 +1,10 @@
+{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE Rank2Types          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE RecordWildCards     #-}
 
 {-|
 
@@ -19,21 +22,30 @@ module Hledger.Data.Journal (
   addTransactionModifier,
   addPeriodicTransaction,
   addTransaction,
+  journalDbg,
   journalInferMarketPricesFromTransactions,
-  journalApplyCommodityStyles,
-  commodityStylesFromAmounts,
+  journalInferCommodityStyles,
+  journalStyleAmounts,
   journalCommodityStyles,
+  journalCommodityStylesWith,
   journalToCost,
+  journalInferEquityFromCosts,
+  journalTagCostsAndEquityAndMaybeInferCosts,
   journalReverse,
   journalSetLastReadTime,
+  journalRenumberAccountDeclarations,
   journalPivot,
-  -- * Filtering
+  journalPostingsAddAccountTags,
+  journalPostingsKeepAccountTagsOnly,
+  journalPostingsAddCommodityTags,
+-- * Filtering
   filterJournalTransactions,
   filterJournalPostings,
   filterJournalRelatedPostings,
   filterJournalAmounts,
   filterTransactionAmounts,
   filterTransactionPostings,
+  filterTransactionPostingsExtra,
   filterTransactionRelatedPostings,
   filterPostingAmount,
   -- * Mapping
@@ -47,6 +59,11 @@ module Hledger.Data.Journal (
   journalAccountNamesDeclaredOrUsed,
   journalAccountNamesDeclaredOrImplied,
   journalAccountNames,
+  journalLeafAccountNames,
+  journalAccountNameTree,
+  journalAccountTags,
+  journalCommodityTags,
+  journalInheritedAccountTags,
   -- journalAmountAndPriceCommodities,
   -- journalAmountStyles,
   -- overJournalAmounts,
@@ -55,8 +72,17 @@ module Hledger.Data.Journal (
   journalPayeesDeclared,
   journalPayeesUsed,
   journalPayeesDeclaredOrUsed,
+  journalTagsDeclared,
+  journalTagsUsed,
+  journalTagsDeclaredOrUsed,
+  journalAmounts,
+  journalPostingAmounts,
+  journalPostingAndCostAmounts,
   journalCommoditiesDeclared,
+  journalCommoditiesUsed,
   journalCommodities,
+  journalCommoditiesFromPriceDirectives,
+  journalCommoditiesFromTransactions,
   journalDateSpan,
   journalDateSpanBothDates,
   journalStartDate,
@@ -69,30 +95,31 @@ module Hledger.Data.Journal (
   journalNextTransaction,
   journalPrevTransaction,
   journalPostings,
+  showJournalPostingAmountsDebug,
   journalTransactionsSimilarTo,
-  -- journalPrices,
-  -- * Standard account types
-  journalBalanceSheetAccountQuery,
-  journalProfitAndLossAccountQuery,
-  journalRevenueAccountQuery,
-  journalExpenseAccountQuery,
-  journalAssetAccountQuery,
-  journalLiabilityAccountQuery,
-  journalEquityAccountQuery,
-  journalCashAccountQuery,
+  -- * Account types
+  journalAccountType,
+  journalAccountTypes,
+  journalAddAccountTypes,
+  -- * Conversion accounts
+  defaultBaseConversionAccount,
+  journalBaseConversionAccount,
+  journalConversionAccounts,
   -- * Misc
-  canonicalStyleFrom,
   nulljournal,
+  journalConcat,
   journalNumberTransactions,
   journalNumberAndTieTransactions,
   journalUntieTransactions,
   journalModifyTransactions,
   journalApplyAliases,
+  dbgJournalAcctDeclOrder,
   -- * Tests
   samplejournal,
   samplejournalMaybeExplicit,
-  tests_Journal
-,journalLeafAccountNamesDeclared)
+  tests_Journal,
+  --
+)
 where
 
 import Control.Applicative ((<|>))
@@ -101,39 +128,48 @@ import Control.Monad.State.Strict (StateT)
 import Data.Char (toUpper, isDigit)
 import Data.Default (Default(..))
 import Data.Foldable (toList)
-import Data.List ((\\), find, foldl', sortBy)
+import Data.List ((\\), find, sortBy, union, intercalate)
+#if !MIN_VERSION_base(4,20,0)
+import Data.List (foldl')
+#endif
 import Data.List.Extra (nubSort)
-import qualified Data.Map.Strict as M
+import Data.Map.Strict qualified as M
 import Data.Maybe (catMaybes, fromMaybe, mapMaybe, maybeToList)
-import qualified Data.Set as S
+import Data.Set qualified as S
 import Data.Text (Text)
-import qualified Data.Text as T
-import Safe (headMay, headDef, maximumMay, minimumMay)
-import Data.Time.Calendar (Day, addDays, fromGregorian)
+import Data.Text qualified as T
+import Safe (headMay, headDef, maximumMay, minimumMay, lastDef)
+import Data.Time.Calendar (Day, addDays, fromGregorian, diffDays)
 import Data.Time.Clock.POSIX (POSIXTime)
-import Data.Tree (Tree, flatten)
+import Data.Tree (Tree(..), flatten)
 import Text.Printf (printf)
 import Text.Megaparsec (ParsecT)
-import Text.Megaparsec.Custom (FinalParseError)
 
 import Hledger.Utils
 import Hledger.Data.Types
 import Hledger.Data.AccountName
 import Hledger.Data.Amount
+import Hledger.Data.Posting
 import Hledger.Data.Transaction
 import Hledger.Data.TransactionModifier
-import Hledger.Data.Posting
+import Hledger.Data.Valuation
 import Hledger.Query
+import System.FilePath (takeFileName)
+import Data.Ord (comparing)
+import Hledger.Data.Dates (nulldate)
+import Data.List (sort)
+import Data.Function ((&))
+-- import Data.Function ((&))
 
 
 -- | A parser of text that runs in some monad, keeping a Journal as state.
-type JournalParser m a = StateT Journal (ParsecT CustomErr Text m) a
+type JournalParser m a = StateT Journal (ParsecT HledgerParseErrorData Text m) a
 
 -- | A parser of text that runs in some monad, keeping a Journal as
 -- state, that can throw an exception to end parsing, preventing
 -- further parser backtracking.
 type ErroringJournalParser m a =
-  StateT Journal (ParsecT CustomErr Text (ExceptT FinalParseError m)) a
+  StateT Journal (ParsecT HledgerParseErrorData Text (ExceptT FinalParseError m)) a
 
 -- deriving instance Show Journal
 instance Show Journal where
@@ -152,28 +188,48 @@ instance Show Journal where
              (length $ jtxns j)
              (length accounts)
              (show accounts)
-             (show $ jinferredcommodities j)
+             (show $ jinferredcommoditystyles j)
              -- ++ (show $ journalTransactions l)
              where accounts = filter (/= "root") $ flatten $ journalAccountNameTree j
 
--- showJournalDebug j = unlines [
---                       show j
---                      ,show (jtxns j)
---                      ,show (jtxnmodifiers j)
---                      ,show (jperiodictxns j)
---                      ,show $ jparsetimeclockentries j
---                      ,show $ jpricedirectives j
---                      ,show $ jfinalcommentlines j
---                      ,show $ jparsestate j
---                      ,show $ map fst $ jfiles j
---                      ]
+journalDbg j@Journal{..} = chomp $ unlines $
+  ("Journal " ++ takeFileName (journalFilePath j)++":") :  --  ++ " {"
+  map (" "<>) [
+   "jparsedefaultyear: "         <> shw jparsedefaultyear
+  ,"jparsedefaultcommodity: "    <> shw jparsedefaultcommodity
+  ,"jparsedecimalmark: "         <> shw jparsedecimalmark
+  ,"jparseparentaccounts: "      <> shw jparseparentaccounts
+  ,"jparsealiases: "             <> shw jparsealiases
+  -- ,"jparsetimeclockentries: " <> shw jparsetimeclockentries
+  ,"jincludefilestack: "         <> shw jincludefilestack
+  ,"jdeclaredpayees: "           <> shw jdeclaredpayees
+  ,"jdeclaredtags: "             <> shw jdeclaredtags
+  ,"jdeclaredaccounts: "         <> shw jdeclaredaccounts
+  ,"jdeclaredaccounttags: "      <> shw jdeclaredaccounttags
+  ,"jdeclaredaccounttypes: "     <> shw jdeclaredaccounttypes
+  ,"jaccounttypes: "             <> shw jaccounttypes
+  ,"jdeclaredcommodities: "      <> shw jdeclaredcommodities
+  ,"jinferredcommoditystyles: "  <> shw jinferredcommoditystyles
+  ,"jglobalcommoditystyles: "    <> shw jglobalcommoditystyles
+  ,"jpricedirectives: "          <> shw jpricedirectives
+  ,"jinferredmarketprices: "     <> shw jinferredmarketprices
+  ,"jtxnmodifiers: "             <> shw jtxnmodifiers
+  -- ,"jperiodictxns: "          <> shw jperiodictxns
+  ,"jtxns: "                     <> shw jtxns
+  ,"jfinalcommentlines: "        <> shw jfinalcommentlines
+  ,"jfiles: "                    <> shw jfiles
+  ,"jlastreadtime: "             <> shw jlastreadtime
+  ]
+  -- ++ ["}"]
+  where
+    shw :: Show a => a -> String
+    shw = show
+    -- shw = pshow
 
 -- The semigroup instance for Journal is useful for two situations.
 --
 -- 1. concatenating finalised journals, eg with multiple -f options:
--- FIRST <> SECOND. The second's list fields are appended to the
--- first's, map fields are combined, transaction counts are summed,
--- the parse state of the second is kept.
+-- FIRST <> SECOND.
 --
 -- 2. merging a child parsed journal, eg with the include directive:
 -- CHILD <> PARENT. A parsed journal's data is in reverse order, so
@@ -181,8 +237,22 @@ instance Show Journal where
 --
 -- Note that (<>) is right-biased, so nulljournal is only a left identity.
 -- In particular, this prevents Journal from being a monoid.
-instance Semigroup Journal where
-  j1 <> j2 = Journal {
+instance Semigroup Journal where j1 <> j2 = j1 `journalConcat` j2
+
+-- | Merge two journals into one.
+-- Transaction counts are summed, map fields are combined,
+-- the second's list fields are appended to the first's,
+-- the second's parse state is kept.
+journalConcat :: Journal -> Journal -> Journal
+journalConcat j1 j2 =
+  let
+    f1 = takeFileName $ journalFilePath j1
+    f2 = maybe "(unknown)" takeFileName $ fmap fst $ headMay $ jincludefilestack j2  -- XXX more accurate than journalFilePath for some reason
+  in
+    dbgJournalAcctDeclOrder ("journalConcat: " <> f1 <> " <> " <> f2 <> ", acct decls renumbered: ") $
+    journalRenumberAccountDeclarations $
+    dbgJournalAcctDeclOrder ("journalConcat: " <> f1 <> " <> " <> f2 <> ", acct decls           : ") $
+    Journal {
      jparsedefaultyear          = jparsedefaultyear          j2
     ,jparsedefaultcommodity     = jparsedefaultcommodity     j2
     ,jparsedecimalmark          = jparsedecimalmark          j2
@@ -192,11 +262,37 @@ instance Semigroup Journal where
     ,jparsetimeclockentries     = jparsetimeclockentries     j1 <> jparsetimeclockentries     j2
     ,jincludefilestack          = jincludefilestack j2
     ,jdeclaredpayees            = jdeclaredpayees            j1 <> jdeclaredpayees            j2
+    ,jdeclaredtags              = jdeclaredtags              j1 <> jdeclaredtags              j2
     ,jdeclaredaccounts          = jdeclaredaccounts          j1 <> jdeclaredaccounts          j2
-    ,jdeclaredaccounttypes      = jdeclaredaccounttypes      j1 <> jdeclaredaccounttypes      j2
-    ,jglobalcommoditystyles     = jglobalcommoditystyles     j1 <> jglobalcommoditystyles     j2
-    ,jcommodities               = jcommodities               j1 <> jcommodities               j2
-    ,jinferredcommodities       = jinferredcommodities       j1 <> jinferredcommodities       j2
+    --
+    -- The next six fields are Maps, which need to be merged carefully for correct semantics,
+    -- especially the first two, which have list values. There may still be room for improvement here.
+    --
+    -- ,jdeclaredaccounttags   :: M.Map AccountName [Tag]
+    -- jdeclaredaccounttags can have multiple duplicated/conflicting values for an account's tag.
+    ,jdeclaredaccounttags       = M.unionWith (<>) (jdeclaredaccounttags j1) (jdeclaredaccounttags j2)
+    --
+    -- ,jdeclaredaccounttypes  :: M.Map AccountType [AccountName]
+    -- jdeclaredaccounttypes can have multiple duplicated/conflicting values for an account's type.
+    ,jdeclaredaccounttypes      = M.unionWith (<>) (jdeclaredaccounttypes j1) (jdeclaredaccounttypes j2)
+    --
+    -- ,jaccounttypes          :: M.Map AccountName AccountType
+    -- jaccounttypes has a single type for any given account. When it had multiple type declarations, the last/rightmost wins.
+    ,jaccounttypes              = M.unionWith (const id) (jaccounttypes j1) (jaccounttypes j2)
+    --
+    -- ,jglobalcommoditystyles :: M.Map CommoditySymbol AmountStyle
+    ,jglobalcommoditystyles     = (<>) (jglobalcommoditystyles j1) (jglobalcommoditystyles j2)
+    --
+    -- ,jdeclaredcommodities           :: M.Map CommoditySymbol Commodity
+    ,jdeclaredcommodities               = (<>) (jdeclaredcommodities j1) (jdeclaredcommodities j2)
+    --
+    -- ,jdeclaredcommoditytags     :: M.Map CommoditySymbol [Tag]
+    ,jdeclaredcommoditytags     = M.unionWith (<>) (jdeclaredcommoditytags j1) (jdeclaredcommoditytags j2)
+    --
+    -- ,jinferredcommoditystyles   :: M.Map CommoditySymbol AmountStyle
+    ,jinferredcommoditystyles       = (<>) (jinferredcommoditystyles j1) (jinferredcommoditystyles j2)
+    --
+    --
     ,jpricedirectives           = jpricedirectives           j1 <> jpricedirectives           j2
     ,jinferredmarketprices      = jinferredmarketprices      j1 <> jinferredmarketprices      j2
     ,jtxnmodifiers              = jtxnmodifiers              j1 <> jtxnmodifiers              j2
@@ -206,6 +302,33 @@ instance Semigroup Journal where
     ,jfiles                     = jfiles                     j1 <> jfiles                     j2
     ,jlastreadtime              = max (jlastreadtime j1) (jlastreadtime j2)
     }
+
+-- | Renumber all the account declarations. This is useful to call when
+-- finalising or concatenating Journals, to give account declarations
+-- a total order across files.
+journalRenumberAccountDeclarations :: Journal -> Journal
+journalRenumberAccountDeclarations j = j{jdeclaredaccounts=jdas'}
+  where
+    jdas' = [(a, adi{adideclarationorder=n}) | (n, (a,adi)) <- zip [1..] $ jdeclaredaccounts j]
+    -- the per-file declaration order saved during parsing is discarded,
+    -- it seems unneeded except perhaps for debugging
+
+-- | Debug log the ordering of a journal's account declarations
+-- (at debug level 7+).
+dbgJournalAcctDeclOrder :: String -> Journal -> Journal
+dbgJournalAcctDeclOrder prefix =
+  dbg7With ((prefix++) . showAcctDeclsSummary . jdeclaredaccounts)
+  where
+    showAcctDeclsSummary :: [(AccountName,AccountDeclarationInfo)] -> String
+    showAcctDeclsSummary adis
+      | length adis < (2*n+2) = "[" <> showadis adis <> "]"
+      | otherwise =
+          "[" <> showadis (take n adis) <> " ... " <> showadis (takelast n adis) <> "]"
+      where
+        n = 3
+        showadis = intercalate ", " . map showadi
+        showadi (a,adi) = "("<>show (adideclarationorder adi)<>","<>T.unpack a<>")"
+        takelast n' = reverse . take n' . reverse
 
 instance Default Journal where
   def = nulljournal
@@ -221,11 +344,15 @@ nulljournal = Journal {
   ,jparsetimeclockentries     = []
   ,jincludefilestack          = []
   ,jdeclaredpayees            = []
+  ,jdeclaredtags              = []
   ,jdeclaredaccounts          = []
+  ,jdeclaredaccounttags       = M.empty
   ,jdeclaredaccounttypes      = M.empty
+  ,jaccounttypes              = M.empty
   ,jglobalcommoditystyles     = M.empty
-  ,jcommodities               = M.empty
-  ,jinferredcommodities       = M.empty
+  ,jdeclaredcommodities       = M.empty
+  ,jdeclaredcommoditytags     = M.empty
+  ,jinferredcommoditystyles   = M.empty
   ,jpricedirectives           = []
   ,jinferredmarketprices      = []
   ,jtxnmodifiers              = []
@@ -243,7 +370,7 @@ journalFilePaths :: Journal -> [FilePath]
 journalFilePaths = map fst . jfiles
 
 mainfile :: Journal -> (FilePath, Text)
-mainfile = headDef ("", "") . jfiles
+mainfile = headDef ("(unknown)", "") . jfiles
 
 addTransaction :: Transaction -> Journal -> Journal
 addTransaction t j = j { jtxns = t : jtxns j }
@@ -275,13 +402,51 @@ journalPrevTransaction j t = journalTransactionAt j (tindex t - 1)
 journalPostings :: Journal -> [Posting]
 journalPostings = concatMap tpostings . jtxns
 
+-- | All posting amounts from this journal, in order.
+journalPostingAmounts :: Journal -> [MixedAmount]
+journalPostingAmounts = map pamount . journalPostings
+
+-- | Show the journal posting amounts rendered, suitable for debug logging.
+showJournalPostingAmountsDebug :: Journal -> String
+showJournalPostingAmountsDebug = show . map showMixedAmountOneLine . journalPostingAmounts
+
+-- | All raw amounts used in this journal's postings and costs,
+-- with MixedAmounts flattened, in parse order.
+journalPostingAndCostAmounts :: Journal -> [Amount]
+journalPostingAndCostAmounts = concatMap getAmounts . concatMap (amountsRaw . pamount) . journalPostings
+
+-- | All raw amounts appearing in this journal, with MixedAmounts flattened, in no particular order.
+-- (Including from posting amounts, cost amounts, P directives, and the last D directive.)
+journalAmounts :: Journal -> S.Set Amount
+journalAmounts = S.fromList . journalStyleInfluencingAmounts True
+
 -- | Sorted unique commodity symbols declared by commodity directives in this journal.
 journalCommoditiesDeclared :: Journal -> [CommoditySymbol]
-journalCommoditiesDeclared = M.keys . jcommodities
+journalCommoditiesDeclared = M.keys . jdeclaredcommodities
 
--- | Sorted unique commodity symbols declared or inferred from this journal.
+-- | Sorted unique commodity symbols used anywhere in this journal, including
+-- commodity directives, P directives, the last D directive, posting amounts and cost amounts.
+journalCommoditiesUsed :: Journal -> [CommoditySymbol]
+journalCommoditiesUsed j = S.elems $
+  journalCommoditiesFromPriceDirectives j <>
+  (S.fromList $ map acommodity $ journalStyleInfluencingAmounts True j)
+
+-- | Sorted unique commodity symbols mentioned anywhere in this journal.
+-- (Including commodity directives, P directives, the last D directive, posting amounts and cost amounts.)
 journalCommodities :: Journal -> S.Set CommoditySymbol
-journalCommodities j = M.keysSet (jcommodities j) <> M.keysSet (jinferredcommodities j)
+journalCommodities j =
+     M.keysSet (jdeclaredcommodities j)
+  <> journalCommoditiesFromPriceDirectives j
+  <> S.fromList (map acommodity $ journalStyleInfluencingAmounts True j)
+
+-- | Sorted unique commodity symbols mentioned in this journal's P directives.
+journalCommoditiesFromPriceDirectives :: Journal -> S.Set CommoditySymbol
+journalCommoditiesFromPriceDirectives = S.fromList . concatMap pdcomms . jpricedirectives
+  where pdcomms pd = [pdcommodity pd, acommodity $ pdamount pd]
+
+-- | Sorted unique commodity symbols used in transactions, in either posting or cost amounts.
+journalCommoditiesFromTransactions :: Journal -> S.Set CommoditySymbol
+journalCommoditiesFromTransactions j = S.fromList $ map acommodity $ journalPostingAndCostAmounts j
 
 -- | Unique transaction descriptions used in this journal.
 journalDescriptions :: Journal -> [Text]
@@ -300,6 +465,20 @@ journalPayeesDeclaredOrUsed :: Journal -> [Payee]
 journalPayeesDeclaredOrUsed j = toList $ foldMap S.fromList
     [journalPayeesDeclared j, journalPayeesUsed j]
 
+-- | Sorted unique tag names declared by tag directives in this journal.
+journalTagsDeclared :: Journal -> [TagName]
+journalTagsDeclared = nubSort . map fst . jdeclaredtags
+
+-- | Sorted unique tag names used in this journal (in account directives, transactions, postings..)
+journalTagsUsed :: Journal -> [TagName]
+journalTagsUsed j = nubSort $ map fst $ concatMap transactionAllTags $ jtxns j
+  -- tags used in all transactions and postings and postings' accounts
+
+-- | Sorted unique tag names used in transactions or declared by tag directives in this journal.
+journalTagsDeclaredOrUsed :: Journal -> [TagName]
+journalTagsDeclaredOrUsed j = toList $ foldMap S.fromList
+    [journalTagsDeclared j, journalTagsUsed j]
+
 -- | Sorted unique account names posted to by this journal's transactions.
 journalAccountNamesUsed :: Journal -> [AccountName]
 journalAccountNamesUsed = accountNamesFromPostings . journalPostings
@@ -312,11 +491,6 @@ journalAccountNamesImplied = expandAccountNames . journalAccountNamesUsed
 -- | Sorted unique account names declared by account directives in this journal.
 journalAccountNamesDeclared :: Journal -> [AccountName]
 journalAccountNamesDeclared = nubSort . map fst . jdeclaredaccounts
-
--- | Sorted unique account names declared by account directives in this journal,
--- which have no children.
-journalLeafAccountNamesDeclared :: Journal -> [AccountName]
-journalLeafAccountNamesDeclared = treeLeaves . accountNameTreeFrom . journalAccountNamesDeclared
 
 -- | Sorted unique account names declared by account directives or posted to
 -- by transactions in this journal.
@@ -334,23 +508,58 @@ journalAccountNamesDeclaredOrImplied j = toList $ foldMap S.fromList
 journalAccountNames :: Journal -> [AccountName]
 journalAccountNames = journalAccountNamesDeclaredOrImplied
 
+-- | Sorted unique account names declared or implied in this journal
+-- which have no children.
+journalLeafAccountNames :: Journal -> [AccountName]
+journalLeafAccountNames = treeLeaves . journalAccountNameTree
+
 journalAccountNameTree :: Journal -> Tree AccountName
 journalAccountNameTree = accountNameTreeFrom . journalAccountNamesDeclaredOrImplied
 
+-- | Which tags have been declared explicitly for this account, if any ?
+journalAccountTags :: Journal -> AccountName -> [Tag]
+journalAccountTags Journal{jdeclaredaccounttags} a = M.findWithDefault [] a jdeclaredaccounttags
+
+-- | Which tags are in effect for this account, including tags inherited from parent accounts ?
+journalInheritedAccountTags :: Journal -> AccountName -> [Tag]
+journalInheritedAccountTags j a =
+  foldl' (\ts a' -> ts `union` journalAccountTags j a') [] as
+  where
+    as = a : parentAccountNames a
+-- PERF: cache in journal ?
+
+type DateWeightedSimilarityScore = Double
+type SimilarityScore = Double
+type Age = Integer
+
 -- | Find up to N most similar and most recent transactions matching
--- the given transaction description and query. Transactions are
--- listed with their description's similarity score (see
--- compareDescriptions), sorted by highest score and then by date.
--- Only transactions with a similarity score greater than a minimum
--- threshold (currently 0) are returned.
-journalTransactionsSimilarTo :: Journal -> Query -> Text -> Int -> [(Double,Transaction)]
-journalTransactionsSimilarTo Journal{jtxns} q desc n =
+-- the given transaction description and query and exceeding the given
+-- description similarity score (0 to 1, see compareDescriptions).
+-- Returns transactions along with
+-- their age in days compared to the latest transaction date,
+-- their description similarity score,
+-- and a heuristically date-weighted variant of this that favours more recent transactions.
+journalTransactionsSimilarTo :: Journal -> Text -> Query -> SimilarityScore -> Int
+  -> [(DateWeightedSimilarityScore, Age, SimilarityScore, Transaction)]
+journalTransactionsSimilarTo Journal{jtxns} desc q similaritythreshold n =
   take n $
-  sortBy (\(s1,t1) (s2,t2) -> compare (s2,tdate t2) (s1,tdate t1)) $
-  filter ((> threshold).fst)
+  dbg1With (
+    unlines . 
+    ("up to 30 transactions above description similarity threshold "<>show similaritythreshold<>" ordered by recency-weighted similarity:":) .
+    take 30 .
+    map ( \(w,a,s,Transaction{..}) -> printf "weighted:%8.3f  age:%4d similarity:%5.3f  %s %s" w a s (show tdate) tdescription )) $
+  sortBy (comparing (negate.first4)) $
+  map (\(s,t) -> (weightedScore (s,t), age t, s, t)) $
+  filter ((> similaritythreshold).fst)
   [(compareDescriptions desc $ tdescription t, t) | t <- jtxns, q `matchesTransaction` t]
   where
-    threshold = 0
+    latest = lastDef nulldate $ sort $ map tdate jtxns
+    age = diffDays latest . tdate
+    -- Combine similarity and recency heuristically. This gave decent results
+    -- in my "find most recent invoice" use case in 2023-03,
+    -- but will probably need more attention.
+    weightedScore :: (Double, Transaction) -> Double
+    weightedScore (s, t) = 100 * s - fromIntegral (age t) / 4
 
 -- | Return a similarity score from 0 to 1.5 for two transaction descriptions. 
 -- This is based on compareStrings, with the following modifications:
@@ -392,119 +601,84 @@ letterPairs :: String -> [String]
 letterPairs (a:b:rest) = [a,b] : letterPairs (b:rest)
 letterPairs _ = []
 
--- queries for standard account types
+-- Newer account type code.
 
--- | Get a query for accounts of the specified types in this journal. 
--- Account types include Asset, Liability, Equity, Revenue, Expense, Cash.
--- For each type, if no accounts were declared with this type, the query 
--- will instead match accounts with names matched by the case-insensitive 
--- regular expression provided as a fallback.
--- The query will match all accounts which were declared as one of
--- these types (by account directives with the type: tag), plus all their 
--- subaccounts which have not been declared as some other type.
-journalAccountTypeQuery :: [AccountType] -> Regexp -> Journal -> Query
-journalAccountTypeQuery atypes fallbackregex Journal{jdeclaredaccounttypes} =
-  let
-    declaredacctsoftype :: [AccountName] =
-      concat $ mapMaybe (`M.lookup` jdeclaredaccounttypes) atypes
-  in case declaredacctsoftype of
-    [] -> Acct fallbackregex
-    as -> And $ Or acctnameRegexes : if null differentlyTypedRegexes then [] else [ Not $ Or differentlyTypedRegexes ]
+journalAccountType :: Journal -> AccountName -> Maybe AccountType
+journalAccountType Journal{jaccounttypes} = accountNameType jaccounttypes
+
+-- | Add a map of all known account types to the journal.
+journalAddAccountTypes :: Journal -> Journal
+journalAddAccountTypes j = j{jaccounttypes = journalAccountTypes j}
+
+-- | An account type inherited from the parent account(s),
+-- and whether it was originally declared by an account directive (true) or inferred from an account name (false).
+type ParentAccountType = (AccountType, Bool)
+
+-- | Build a map of all known account types, explicitly declared
+-- or inferred from the account's parent or name.
+journalAccountTypes :: Journal -> M.Map AccountName AccountType
+journalAccountTypes j = M.fromList [(a,acctType) | (a, Just (acctType,_)) <- flatten t']
+  where
+    t = accountNameTreeFrom $ journalAccountNames j :: Tree AccountName
+    -- Traverse downward through the account tree, applying any explicitly declared account types,
+    -- otherwise inferring account types from account names when possible, and propagating account types downward.
+    -- Declared account types (possibly inherited from parent) are preferred, inferred types are used as a fallback.
+    t' = setTypeHereAndBelow Nothing t :: Tree (AccountName, Maybe (AccountType, Bool))
       where
-        -- XXX Query isn't able to match account type since that requires extra info from the journal.
-        -- So we do a hacky search by name instead.
-        acctnameRegexes = map (Acct . accountNameToAccountRegex) as
-        differentlyTypedRegexes = map (Acct . accountNameToAccountRegex) differentlytypedsubs
+        declaredtypes       = M.keys $ jdeclaredaccounttypes j
+        declaredtypesbyname = journalDeclaredAccountTypes j & fmap (,True)
+        setTypeHereAndBelow :: Maybe ParentAccountType -> Tree AccountName -> Tree (AccountName, Maybe ParentAccountType)
+        setTypeHereAndBelow mparenttype (Node a subs) = Node (a, mnewtype) (map (setTypeHereAndBelow mnewtype) subs)
+          where
+            mnewtype = mthisacctdeclaredtype <|> mparentacctdeclaredtype <|> mthisacctinferredtype <|> mparentacctinferredtype
+              where
+                mthisacctdeclaredtype   = M.lookup a declaredtypesbyname
+                mparentacctdeclaredtype = if       fromMaybe False $ snd <$> mparenttype then mparenttype else Nothing
+                mparentacctinferredtype = if not $ fromMaybe True  $ snd <$> mparenttype then mparenttype else Nothing
+                mthisacctinferredtype   = accountNameInferTypeExcept declaredtypes a & fmap (,False)  -- XXX not sure about this Except logic.. but for now, tests pass
 
-        differentlytypedsubs = concat
-          [subs | (t,bs) <- M.toList jdeclaredaccounttypes
-              , t `notElem` atypes
-              , let subs = [b | b <- bs, any (`isAccountNamePrefixOf` b) as]
-          ]
+-- | Build a map from account names to explicitly declared account types.
+journalDeclaredAccountTypes :: Journal -> M.Map AccountName AccountType
+journalDeclaredAccountTypes Journal{jdeclaredaccounttypes} =
+  M.fromList $ concat [map (,t) as | (t,as) <- M.toList jdeclaredaccounttypes]
 
--- | A query for accounts in this journal which have been
--- declared as Asset (or Cash, a subtype of Asset) by account directives, 
--- or otherwise for accounts with names matched by the case-insensitive 
--- regular expression @^assets?(:|$)@.
-journalAssetAccountQuery :: Journal -> Query
-journalAssetAccountQuery j = 
-  Or [
-     journalAccountTypeQuery [Asset] (toRegexCI' "^assets?(:|$)") j
-    ,journalCashAccountOnlyQuery j
-  ]
+-- | To all postings in the journal, add any tags from their account
+-- (including those inherited from parent accounts).
+-- If a tag already exists on the posting, it is not changed (the account tag will be ignored).
+journalPostingsAddAccountTags :: Journal -> Journal
+journalPostingsAddAccountTags j = journalMapPostings addtags j
+  where addtags p = p `postingAddTags` (journalInheritedAccountTags j $ paccount p)
 
--- | A query for accounts in this journal which have been
--- declared as Asset (and not Cash) by account directives, 
--- or otherwise for accounts with names matched by the case-insensitive 
--- regular expression @^assets?(:|$)@.
-journalAssetNonCashAccountQuery :: Journal -> Query
-journalAssetNonCashAccountQuery = journalAccountTypeQuery [Asset] (toRegexCI' "^assets?(:|$)")
+-- | Get any tags declared for this commodity.
+journalCommodityTags :: Journal -> CommoditySymbol -> [Tag]
+journalCommodityTags Journal{jdeclaredcommoditytags} c =
+  M.findWithDefault [] c jdeclaredcommoditytags
 
--- | A query for Cash (liquid asset) accounts in this journal, ie accounts
--- declared as Cash by account directives, or otherwise Asset accounts whose 
--- names do not include the case-insensitive regular expression 
--- @(investment|receivable|:A/R|:fixed)@.
-journalCashAccountQuery  :: Journal -> Query
-journalCashAccountQuery j =
-  case M.lookup Cash (jdeclaredaccounttypes j) of
-    Just _  -> journalCashAccountOnlyQuery j
-    Nothing ->
-      -- no Cash accounts are declared; query for Asset accounts and exclude some of them
-      And [ journalAssetNonCashAccountQuery j, Not . Acct $ toRegexCI' "(investment|receivable|:A/R|:fixed)" ]
+-- | To all postings in the journal, add any tags from their amount's commodities.
+-- If a tag already exists on the posting, it is not changed (the commodity tag will be ignored).
+journalPostingsAddCommodityTags :: Journal -> Journal
+journalPostingsAddCommodityTags j = journalMapPostings addtags j
+  where
+    addtags p = p `postingAddTags` concatMap (journalCommodityTags j) (postingCommodities p)
 
--- | A query for accounts in this journal specifically declared as Cash by 
--- account directives, or otherwise the None query.
-journalCashAccountOnlyQuery  :: Journal -> Query
-journalCashAccountOnlyQuery j = 
-  case M.lookup Cash (jdeclaredaccounttypes j) of
-    Just _  -> 
-      -- Cash accounts are declared; get a query for them (the fallback regex won't be used)
-      journalAccountTypeQuery [Cash] notused j
-        where notused = error' "journalCashAccountOnlyQuery: this should not have happened!"  -- PARTIAL:
-    Nothing -> None
+-- | Remove all tags from the journal's postings except those provided by their account.
+-- This is useful for the accounts report.
+-- It does not remove tag declarations from the posting comments.
+journalPostingsKeepAccountTagsOnly :: Journal -> Journal
+journalPostingsKeepAccountTagsOnly j = journalMapPostings keepaccounttags j
+  where keepaccounttags p = p{ptags=[]} `postingAddTags` (journalInheritedAccountTags j $ paccount p)
 
--- | A query for accounts in this journal which have been
--- declared as Liability by account directives, or otherwise for
--- accounts with names matched by the case-insensitive regular expression
--- @^(debts?|liabilit(y|ies))(:|$)@.
-journalLiabilityAccountQuery :: Journal -> Query
-journalLiabilityAccountQuery = journalAccountTypeQuery [Liability] (toRegexCI' "^(debts?|liabilit(y|ies))(:|$)")
+-- | The account name to use for conversion postings generated by --infer-equity.
+-- This is the first account declared with type V/Conversion,
+-- or otherwise the defaultBaseConversionAccount (equity:conversion).
+journalBaseConversionAccount :: Journal -> AccountName
+journalBaseConversionAccount = headDef defaultBaseConversionAccount . journalConversionAccounts
 
--- | A query for accounts in this journal which have been
--- declared as Equity by account directives, or otherwise for
--- accounts with names matched by the case-insensitive regular expression
--- @^equity(:|$)@.
-journalEquityAccountQuery :: Journal -> Query
-journalEquityAccountQuery = journalAccountTypeQuery [Equity] (toRegexCI' "^equity(:|$)")
+-- | All the accounts in this journal which are declared or inferred as V/Conversion type.
+-- This does not include new account names which might be generated by --infer-equity, currently.
+journalConversionAccounts :: Journal -> [AccountName]
+journalConversionAccounts = M.keys . M.filter (==Conversion) . jaccounttypes
 
--- | A query for accounts in this journal which have been
--- declared as Revenue by account directives, or otherwise for
--- accounts with names matched by the case-insensitive regular expression
--- @^(income|revenue)s?(:|$)@.
-journalRevenueAccountQuery :: Journal -> Query
-journalRevenueAccountQuery = journalAccountTypeQuery [Revenue] (toRegexCI' "^(income|revenue)s?(:|$)")
-
--- | A query for accounts in this journal which have been
--- declared as Expense by account directives, or otherwise for
--- accounts with names matched by the case-insensitive regular expression
--- @^expenses?(:|$)@.
-journalExpenseAccountQuery  :: Journal -> Query
-journalExpenseAccountQuery = journalAccountTypeQuery [Expense] (toRegexCI' "^expenses?(:|$)")
-
--- | A query for Asset, Liability & Equity accounts in this journal.
--- Cf <http://en.wikipedia.org/wiki/Chart_of_accounts#Balance_Sheet_Accounts>.
-journalBalanceSheetAccountQuery :: Journal -> Query
-journalBalanceSheetAccountQuery j = Or [journalAssetAccountQuery j
-                                       ,journalLiabilityAccountQuery j
-                                       ,journalEquityAccountQuery j
-                                       ]
-
--- | A query for Profit & Loss accounts in this journal.
--- Cf <http://en.wikipedia.org/wiki/Chart_of_accounts#Profit_.26_Loss_accounts>.
-journalProfitAndLossAccountQuery  :: Journal -> Query
-journalProfitAndLossAccountQuery j = Or [journalRevenueAccountQuery j
-                                        ,journalExpenseAccountQuery j
-                                        ]
 
 -- Various kinds of filtering on journals. We do it differently depending
 -- on the command.
@@ -514,12 +688,12 @@ journalProfitAndLossAccountQuery j = Or [journalRevenueAccountQuery j
 
 -- | Keep only transactions matching the query expression.
 filterJournalTransactions :: Query -> Journal -> Journal
-filterJournalTransactions q j@Journal{jtxns=ts} = j{jtxns=filter (q `matchesTransaction`) ts}
+filterJournalTransactions q j@Journal{jtxns} = j{jtxns=filter (matchesTransactionExtra (journalAccountType j) q) jtxns}
 
 -- | Keep only postings matching the query expression.
 -- This can leave unbalanced transactions.
 filterJournalPostings :: Query -> Journal -> Journal
-filterJournalPostings q j@Journal{jtxns=ts} = j{jtxns=map (filterTransactionPostings q) ts}
+filterJournalPostings q j@Journal{jtxns=ts} = j{jtxns=map (filterTransactionPostingsExtra (journalAccountType j) q) ts}
 
 -- | Keep only postings which do not match the query expression, but for which a related posting does.
 -- This can leave unbalanced transactions.
@@ -549,6 +723,11 @@ filterPostingAmount q p@Posting{pamount=as}
 
 filterTransactionPostings :: Query -> Transaction -> Transaction
 filterTransactionPostings q t@Transaction{tpostings=ps} = t{tpostings=filter (q `matchesPosting`) ps}
+
+-- Like filterTransactionPostings, but is given the map of account types so can also filter by account type.
+filterTransactionPostingsExtra :: (AccountName -> Maybe AccountType) -> Query -> Transaction -> Transaction
+filterTransactionPostingsExtra atypes q t@Transaction{tpostings=ps} =
+  t{tpostings=filter (matchesPostingExtra atypes q) ps}
 
 filterTransactionRelatedPostings :: Query -> Transaction -> Transaction
 filterTransactionRelatedPostings q t@Transaction{tpostings=ps} =
@@ -730,25 +909,26 @@ journalUntieTransactions t@Transaction{tpostings=ps} = t{tpostings=map (\p -> p{
 -- postings to transactions, eg). Or if a modifier rule fails to parse,
 -- return the error message. A reference date is provided to help interpret
 -- relative dates in transaction modifier queries.
-journalModifyTransactions :: Day -> Journal -> Either String Journal
-journalModifyTransactions d j =
-    case modifyTransactions (journalCommodityStyles j) d (jtxnmodifiers j) (jtxns j) of
-      Right ts -> Right j{jtxns=ts}
-      Left err -> Left err
+-- The first argument selects whether to add visible tags to generated postings & modified transactions.
+journalModifyTransactions :: Bool -> Day -> Journal -> Either String Journal
+journalModifyTransactions verbosetags d j =
+  case modifyTransactions (journalAccountType j) (journalInheritedAccountTags j) (journalCommodityStyles j) d verbosetags (jtxnmodifiers j) (jtxns j) of
+    Right ts -> Right j{jtxns=ts}
+    Left err -> Left err
 
---
-
--- | Choose and apply a consistent display style to the posting
--- amounts in each commodity (see journalCommodityStyles).
--- Can return an error message eg if inconsistent number formats are found.
-journalApplyCommodityStyles :: Journal -> Either String Journal
-journalApplyCommodityStyles = fmap fixjournal . journalInferCommodityStyles
+-- | Apply this journal's commodity display styles to all of its amounts.
+-- This does no display rounding, keeping decimal digits as they were;
+-- it is suitable for an early cleanup pass before calculations.
+-- Reports may want to do additional rounding/styling at render time.
+-- This can return an error message eg if inconsistent number formats are found.
+journalStyleAmounts :: Journal -> Either String Journal
+journalStyleAmounts = fmap journalapplystyles . journalInferCommodityStyles
   where
-    fixjournal j@Journal{jpricedirectives=pds} =
-        journalMapPostings (postingApplyCommodityStyles styles) j{jpricedirectives=map fixpricedirective pds}
+    journalapplystyles j@Journal{jpricedirectives=pds} =
+      journalMapPostings (styleAmounts styles) j{jpricedirectives=map fixpricedirective pds}
       where
-        styles = journalCommodityStyles j
-        fixpricedirective pd@PriceDirective{pdamount=a} = pd{pdamount=styleAmountExceptPrecision styles a}
+        styles = journalCommodityStylesWith NoRounding j  -- defer rounding, in case of print --round=none
+        fixpricedirective pd@PriceDirective{pdamount=a} = pd{pdamount=styleAmounts styles a}
 
 -- | Get the canonical amount styles for this journal, whether (in order of precedence):
 -- set globally in InputOpts,
@@ -763,64 +943,23 @@ journalCommodityStyles j =
   globalstyles <> declaredstyles <> defaultcommoditystyle <> inferredstyles
   where
     globalstyles          = jglobalcommoditystyles j
-    declaredstyles        = M.mapMaybe cformat $ jcommodities j
+    declaredstyles        = M.mapMaybe cformat $ jdeclaredcommodities j
     defaultcommoditystyle = M.fromList $ catMaybes [jparsedefaultcommodity j]
-    inferredstyles        = jinferredcommodities j
+    inferredstyles        = jinferredcommoditystyles j
+
+-- | Like journalCommodityStyles, but attach a particular rounding strategy to the styles,
+-- affecting how they will affect display precisions when applied.
+journalCommodityStylesWith :: Rounding -> Journal -> M.Map CommoditySymbol AmountStyle
+journalCommodityStylesWith r = amountStylesSetRounding r . journalCommodityStyles
 
 -- | Collect and save inferred amount styles for each commodity based on
--- the posting amounts in that commodity (excluding price amounts), ie:
--- "the format of the first amount, adjusted to the highest precision of all amounts".
+-- P directive amounts, posting amounts but not cost amounts, and maybe the last D amount, in that commodity.
 -- Can return an error message eg if inconsistent number formats are found.
 journalInferCommodityStyles :: Journal -> Either String Journal
 journalInferCommodityStyles j =
-  case commodityStylesFromAmounts $ journalStyleInfluencingAmounts j of
+  case commodityStylesFromAmounts $ journalStyleInfluencingAmounts False j of
     Left e   -> Left e
-    Right cs -> Right j{jinferredcommodities = dbg7 "journalInferCommodityStyles" cs}
-
--- | Given a list of amounts, in parse order (roughly speaking; see journalStyleInfluencingAmounts),
--- build a map from their commodity names to standard commodity
--- display formats. Can return an error message eg if inconsistent
--- number formats are found.
---
--- Though, these amounts may have come from multiple files, so we
--- shouldn't assume they use consistent number formats.
--- Currently we don't enforce that even within a single file,
--- and this function never reports an error.
---
-commodityStylesFromAmounts :: [Amount] -> Either String (M.Map CommoditySymbol AmountStyle)
-commodityStylesFromAmounts =
-    Right . foldr (\a -> M.insertWith canonicalStyle (acommodity a) (astyle a)) mempty
-
--- | Given a list of amount styles (assumed to be from parsed amounts
--- in a single commodity), in parse order, choose a canonical style.
-canonicalStyleFrom :: [AmountStyle] -> AmountStyle
-canonicalStyleFrom = foldl' canonicalStyle amountstyle
-
--- TODO: should probably detect and report inconsistencies here.
--- Though, we don't have the info for a good error message, so maybe elsewhere.
--- | Given a pair of AmountStyles, choose a canonical style.
--- This is:
--- the general style of the first amount,
--- with the first digit group style seen,
--- with the maximum precision of all.
-canonicalStyle :: AmountStyle -> AmountStyle -> AmountStyle
-canonicalStyle a b = a{asprecision=prec, asdecimalpoint=decmark, asdigitgroups=mgrps}
-  where
-    -- precision is maximum of all precisions
-    prec = max (asprecision a) (asprecision b)
-    -- identify the digit group mark (& group sizes)
-    mgrps = asdigitgroups a <|> asdigitgroups b
-    -- if a digit group mark was identified above, we can rely on that;
-    -- make sure the decimal mark is different. If not, default to period.
-    defdecmark = case mgrps of
-        Just (DigitGroups '.' _) -> ','
-        _                        -> '.'
-    -- identify the decimal mark: the first one used, or the above default,
-    -- but never the same character as the digit group mark.
-    -- urgh.. refactor..
-    decmark = case mgrps of
-        Just _  -> Just defdecmark
-        Nothing -> asdecimalpoint a <|> asdecimalpoint b <|> Just defdecmark
+    Right cs -> Right j{jinferredcommoditystyles = dbg7 "journalInferCommodityStyles" cs}
 
 -- -- | Apply this journal's historical price records to unpriced amounts where possible.
 -- journalApplyPriceDirectives :: Journal -> Journal
@@ -832,7 +971,7 @@ canonicalStyle a b = a{asprecision=prec, asdecimalpoint=decmark, asdigitgroups=m
 --         fixmixedamount = mapMixedAmount fixamount
 --         fixamount = fixprice
 --         fixprice a@Amount{price=Just _} = a
---         fixprice a@Amount{commodity=c} = a{price=maybe Nothing (Just . UnitPrice) $ journalPriceDirectiveFor j d c}
+--         fixprice a@Amount{commodity=c} = a{price=maybe Nothing (Just . UnitCost) $ journalPriceDirectiveFor j d c}
 
 -- -- | Get the price for a commodity on the specified day from the price database, if known.
 -- -- Does only one lookup step, ie will not look up the price of a price.
@@ -848,32 +987,33 @@ canonicalStyle a b = a{asprecision=prec, asdecimalpoint=decmark, asdigitgroups=m
 journalInferMarketPricesFromTransactions :: Journal -> Journal
 journalInferMarketPricesFromTransactions j =
   j{jinferredmarketprices =
-       dbg4 "jinferredmarketprices" $
-       mapMaybe postingInferredmarketPrice $ journalPostings j
+       dbg4With (("jinferredmarketprices:\n"<>) . showMarketPrices) $
+       map priceDirectiveToMarketPrice .
+       concatMap postingPriceDirectivesFromCost $
+       journalPostings j
    }
 
--- | Make a market price equivalent to this posting's amount's unit
--- price, if any. If the posting amount is multicommodity, only the
--- first commodity amount is considered.
-postingInferredmarketPrice :: Posting -> Maybe MarketPrice
-postingInferredmarketPrice p@Posting{pamount} =
-    -- convert any total prices to unit prices
-    case amountsRaw $ mixedAmountTotalPriceToUnitPrice pamount of
-      Amount{acommodity=fromcomm, aprice = Just (UnitPrice Amount{acommodity=tocomm, aquantity=rate})}:_ ->
-        Just MarketPrice {
-           mpdate = postingDate p
-          ,mpfrom = fromcomm
-          ,mpto   = tocomm
-          ,mprate = rate
-          }
-      _ -> Nothing
+-- | Convert all this journal's amounts to cost using their attached prices, if any.
+journalToCost :: ConversionOp -> Journal -> Journal
+journalToCost cost j@Journal{jtxns=ts} = j{jtxns=map (transactionToCost cost) ts}
 
--- | Convert all this journal's amounts to cost using the transaction prices, if any.
--- The journal's commodity styles are applied to the resulting amounts.
-journalToCost :: Journal -> Journal
-journalToCost j@Journal{jtxns=ts} = j{jtxns=map (transactionToCost styles) ts}
-    where
-      styles = journalCommodityStyles j
+-- | Identify and tag (1) equity conversion postings and (2) postings which have (or could have ?) redundant costs.
+-- And if the addcosts flag is true, also add any costs which can be inferred from equity conversion postings.
+-- This is always called before transaction balancing to tag the redundant-cost postings so they can be ignored.
+-- With --infer-costs, it is called again after transaction balancing (when it has more information to work with) to infer costs from equity postings.
+-- See transactionTagCostsAndEquityAndMaybeInferCosts for more details, and hledger manual > Cost reporting for more background.
+journalTagCostsAndEquityAndMaybeInferCosts :: Bool -> Bool -> Journal -> Either String Journal
+journalTagCostsAndEquityAndMaybeInferCosts verbosetags addcosts j = do
+  let conversionaccts = journalConversionAccounts j
+  ts <- mapM (transactionTagCostsAndEquityAndMaybeInferCosts verbosetags addcosts conversionaccts) $ jtxns j
+  return j{jtxns=ts}
+
+-- | Add equity postings inferred from costs, where needed and possible.
+-- See hledger manual > Cost reporting.
+journalInferEquityFromCosts :: Bool -> Journal -> Journal
+journalInferEquityFromCosts verbosetags j =
+  journalMapTransactions (transactionInferEquityPostings verbosetags equityAcct) j
+  where equityAcct = journalBaseConversionAccount j
 
 -- -- | Get this journal's unique, display-preference-canonicalised commodities, by symbol.
 -- journalCanonicalCommodities :: Journal -> M.Map String CommoditySymbol
@@ -889,28 +1029,28 @@ journalToCost j@Journal{jtxns=ts} = j{jtxns=map (transactionToCost styles) ts}
 
 -- -- | Get this amount's commodity and any commodities referenced in its price.
 -- amountCommodities :: Amount -> [CommoditySymbol]
--- amountCommodities Amount{acommodity=c,aprice=p} =
+-- amountCommodities Amount{acommodity=c,acost=p} =
 --     case p of Nothing -> [c]
---               Just (UnitPrice ma)  -> c:(concatMap amountCommodities $ amounts ma)
---               Just (TotalPrice ma) -> c:(concatMap amountCommodities $ amounts ma)
+--               Just (UnitCost ma)  -> c:(concatMap amountCommodities $ amounts ma)
+--               Just (TotalCost ma) -> c:(concatMap amountCommodities $ amounts ma)
 
--- | Get an ordered list of amounts in this journal which can
--- influence canonical amount display styles. Those amounts are, in
--- the following order:
+-- | Get an ordered list of amounts in this journal which can influence
+-- canonical amount display styles (excluding the ones in commodity directives). 
+-- They are, in the following order:
 --
 -- * amounts in market price (P) directives (in parse order)
--- * posting amounts in transactions (in parse order)
+-- * posting amounts and optionally cost amounts (in parse order)
 -- * the amount in the final default commodity (D) directive
 --
--- Transaction price amounts (posting amounts' aprice field) are not included.
---
-journalStyleInfluencingAmounts :: Journal -> [Amount]
-journalStyleInfluencingAmounts j =
+journalStyleInfluencingAmounts :: Bool -> Journal -> [Amount]
+journalStyleInfluencingAmounts includecost j =
   dbg7 "journalStyleInfluencingAmounts" $
   catMaybes $ concat [
    [mdefaultcommodityamt]
   ,map (Just . pdamount) $ jpricedirectives j
-  ,map Just . concatMap (amountsRaw . pamount) $ journalPostings j
+  ,map Just $ if includecost
+    then journalPostingAndCostAmounts j
+    else concatMap amountsRaw $ journalPostingAmounts j
   ]
   where
     -- D's amount style isn't actually stored as an amount, make it into one
@@ -921,17 +1061,17 @@ journalStyleInfluencingAmounts j =
 
 -- overcomplicated/unused amount traversal stuff
 --
--- | Get an ordered list of 'AmountStyle's from the amounts in this
+--  Get an ordered list of 'AmountStyle's from the amounts in this
 -- journal which influence canonical amount display styles. See
 -- traverseJournalAmounts.
 -- journalAmounts :: Journal -> [Amount]
 -- journalAmounts = getConst . traverseJournalAmounts (Const . (:[]))
 --
--- | Apply a transformation to the journal amounts traversed by traverseJournalAmounts.
+--  Apply a transformation to the journal amounts traversed by traverseJournalAmounts.
 -- overJournalAmounts :: (Amount -> Amount) -> Journal -> Journal
 -- overJournalAmounts f = runIdentity . traverseJournalAmounts (Identity . f)
 --
--- | A helper that traverses over most amounts in the journal,
+--  A helper that traverses over most amounts in the journal,
 -- in particular the ones which influence canonical amount display styles,
 -- processing them with the given applicative function.
 --
@@ -942,7 +1082,7 @@ journalStyleInfluencingAmounts j =
 -- * posting amounts in transactions (in parse order)
 --
 -- Transaction price amounts, which may be embedded in posting amounts
--- (the aprice field), are left intact but not traversed/processed.
+-- (the acost field), are left intact but not traversed/processed.
 --
 -- traverseJournalAmounts :: Applicative f => (Amount -> f Amount) -> Journal -> f Journal
 -- traverseJournalAmounts f j =
@@ -960,7 +1100,7 @@ journalStyleInfluencingAmounts j =
 --     pamt  g p          = (\amt -> p {pamount  =amt}) <$> g (pamount p)
 --     amts  g (Mixed as) = Mixed <$> g as
 
--- | The fully specified date span enclosing the dates (primary or secondary)
+-- | The fully specified exact date span enclosing the dates (primary or secondary)
 -- of all this journal's transactions and postings, or DateSpan Nothing Nothing
 -- if there are none.
 journalDateSpan :: Bool -> Journal -> DateSpan
@@ -977,7 +1117,7 @@ journalDateSpanBothDates = journalDateSpanHelper Nothing
 -- uses both primary and secondary dates.
 journalDateSpanHelper :: Maybe WhichDate -> Journal -> DateSpan
 journalDateSpanHelper whichdate j =
-    DateSpan (minimumMay dates) (addDays 1 <$> maximumMay dates)
+    DateSpan (Exact <$> minimumMay dates) (Exact . addDays 1 <$> maximumMay dates)
   where
     dates    = pdates ++ tdates
     tdates   = concatMap gettdate ts
@@ -995,12 +1135,12 @@ journalDateSpanHelper whichdate j =
 -- | The earliest of this journal's transaction and posting dates, or
 -- Nothing if there are none.
 journalStartDate :: Bool -> Journal -> Maybe Day
-journalStartDate secondary j = b where DateSpan b _ = journalDateSpan secondary j
+journalStartDate secondary j = fromEFDay <$> b where DateSpan b _ = journalDateSpan secondary j
 
 -- | The "exclusive end date" of this journal: the day following its latest transaction 
 -- or posting date, or Nothing if there are none.
 journalEndDate :: Bool -> Journal -> Maybe Day
-journalEndDate secondary j = e where DateSpan _ e = journalDateSpan secondary j
+journalEndDate secondary j = fromEFDay <$> e where DateSpan _ e = journalDateSpan secondary j
 
 -- | The latest of this journal's transaction and posting dates, or
 -- Nothing if there are none.
@@ -1020,15 +1160,38 @@ transactionPivot fieldortagname t = t{tpostings = map (postingPivot fieldortagna
 -- | Replace this posting's account name with the value
 -- of the given field or tag, if any, otherwise the empty string.
 postingPivot :: Text -> Posting -> Posting
-postingPivot fieldortagname p = p{paccount = pivotedacct, poriginal = Just $ originalPosting p}
+postingPivot fieldortagname p =
+  p{paccount = pivotAccount fieldortagname p, poriginal = Just $ originalPosting p}
+
+pivotAccount :: Text -> Posting -> Text
+pivotAccount fieldortagname p =
+  T.intercalate ":" [pivotComponent x p | x <- T.splitOn ":" fieldortagname]
+
+-- | Get the value of the given field or tag for this posting.
+-- "comm" and "cur" are accepted as synonyms meaning the commodity symbol.
+-- Pivoting on an unknown field or tag, or on commodity when there are multiple commodities, returns "".
+-- Pivoting on a tag when there are multiple values for that tag, returns the first value.
+-- Pivoting on the "type" tag normalises type values to their short spelling.
+pivotComponent :: Text -> Posting -> Text
+pivotComponent fieldortagname p
+  | fieldortagname == "code",        Just t <- ptransaction p = tcode t
+  | fieldortagname `elem` descnames, Just t <- ptransaction p = tdescription t
+  | fieldortagname == "payee",       Just t <- ptransaction p = transactionPayee t
+  | fieldortagname == "note",        Just t <- ptransaction p = transactionNote t
+  | fieldortagname == "status",      Just t <- ptransaction p = T.pack . show . tstatus $ t
+  | fieldortagname == "acct"        = paccount p
+  | fieldortagname `elem` commnames = case map acommodity $ amounts $ pamount p of [s] -> s; _ -> unknown
+  | fieldortagname == "amt"         = case amounts $ pamount p of [a] -> T.pack $ show $ aquantity a; _ -> unknown
+  | fieldortagname == "cost"        = case amounts $ pamount p of [a@Amount{acost=Just _}] -> T.pack $ lstrip $ showAmountCost a; _ -> unknown
+  | Just (_, tagvalue) <- postingFindTag fieldortagname p =
+      if fieldortagname == "type"
+      then either (const tagvalue) (T.pack . show) $ parseAccountType True tagvalue
+      else tagvalue
+  | otherwise = unknown
   where
-    pivotedacct
-      | Just t <- ptransaction p, fieldortagname == "code"        = tcode t
-      | Just t <- ptransaction p, fieldortagname == "description" = tdescription t
-      | Just t <- ptransaction p, fieldortagname == "payee"       = transactionPayee t
-      | Just t <- ptransaction p, fieldortagname == "note"        = transactionNote t
-      | Just (_, value) <- postingFindTag fieldortagname p        = value
-      | otherwise                                                 = ""
+    descnames = ["desc", "description"]   -- allow "description" for hledger <=1.30 compat
+    commnames = ["cur","comm"]            -- allow either; cur is the query prefix, comm is more consistent
+    unknown   = ""
 
 postingFindTag :: TagName -> Posting -> Maybe (TagName, TagValue)
 postingFindTag tagname p = find ((tagname==) . fst) $ postingAllTags p
@@ -1099,7 +1262,7 @@ samplejournalMaybeExplicit explicit = nulljournal
          {jtxns = [
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 01 01,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -1116,7 +1279,7 @@ samplejournalMaybeExplicit explicit = nulljournal
           ,
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 06 01,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -1133,7 +1296,7 @@ samplejournalMaybeExplicit explicit = nulljournal
           ,
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 06 02,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -1150,7 +1313,7 @@ samplejournalMaybeExplicit explicit = nulljournal
           ,
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 06 03,
              tdate2=Nothing,
              tstatus=Cleared,
@@ -1167,7 +1330,7 @@ samplejournalMaybeExplicit explicit = nulljournal
           ,
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 10 01,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -1183,7 +1346,7 @@ samplejournalMaybeExplicit explicit = nulljournal
           ,
            txnTieKnot $ Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2008 12 31,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -1211,25 +1374,5 @@ tests_Journal = testGroup "Journal" [
                               }
               ]
       }
-    @?= (DateSpan (Just $ fromGregorian 2014 1 10) (Just $ fromGregorian 2014 10 11))
-
-  ,testGroup "standard account type queries" $
-    let
-      j = samplejournal
-      journalAccountNamesMatching :: Query -> Journal -> [AccountName]
-      journalAccountNamesMatching q = filter (q `matchesAccount`) . journalAccountNames
-      namesfrom qfunc = journalAccountNamesMatching (qfunc j) j
-    in [testCase "assets"      $ assertEqual "" ["assets","assets:bank","assets:bank:checking","assets:bank:saving","assets:cash"]
-         (namesfrom journalAssetAccountQuery)
-       ,testCase "cash"        $ assertEqual "" ["assets","assets:bank","assets:bank:checking","assets:bank:saving","assets:cash"]
-         (namesfrom journalCashAccountQuery)
-       ,testCase "liabilities" $ assertEqual "" ["liabilities","liabilities:debts"]
-         (namesfrom journalLiabilityAccountQuery)
-       ,testCase "equity"      $ assertEqual "" []
-         (namesfrom journalEquityAccountQuery)
-       ,testCase "income"      $ assertEqual "" ["income","income:gifts","income:salary"]
-         (namesfrom journalRevenueAccountQuery)
-       ,testCase "expenses"    $ assertEqual "" ["expenses","expenses:food","expenses:supplies"]
-         (namesfrom journalExpenseAccountQuery)
-       ]
+    @?= (DateSpan (Just $ Exact $ fromGregorian 2014 1 10) (Just $ Exact $ fromGregorian 2014 10 11))
   ]

@@ -1,20 +1,52 @@
-accounts\
-Show account names.
+## accounts 
 
-_FLAGS
+List the account names used or declared in the journal.
 
-This command lists account names, either declared with account directives
-(--declared), posted to (--used), or both (the default).
-With query arguments, only matched account names and account names 
-referenced by matched postings are shown.
-It shows a flat list by default. With `--tree`, it uses indentation to
-show the account hierarchy.
+```flags
+Flags:
+  -u --used                 list accounts used
+  -d --declared             list accounts declared
+     --undeclared           list accounts used but not declared
+     --unused               list accounts declared but not used
+     --find                 list the first account matched by the first
+                            argument (a case-insensitive infix regexp)
+     --directives           show as account directives, for use in journals
+     --locations            also show where accounts were declared
+     --types                also show account types when known
+  -l --flat                 list/tree mode: show accounts as a flat list
+                            (default)
+  -t --tree                 list/tree mode: show accounts as a tree
+     --drop=N               flat mode: omit N leading account name parts
+```
+
+This command lists account names -
+all of them by default,
+or just the ones which have been used in transactions (`-u/--used`),
+or declared with `account` directives (`-d/--declared`),
+or used but not declared (`--undeclared`),
+or declared but not used (`--unused`),
+or just the first one matched by a pattern (`--find`, returning a non-zero exit code if it fails).
+
+You can add [query arguments](#queries) to select a subset of transactions or accounts.
+
+With `--directives`, it shows valid account directives which could be pasted into a journal file.
+This is useful together with `--undeclared` when updating your account declarations
+to satisfy `hledger check accounts`.
+
+With `--locations`, it also shows the file and line number of each
+account's declaration, if any, and the account's overall declaration order;
+these may be useful when troubleshooting account display order.
+
+With `--types`, it also shows each account's type, if it's known.
+(See Declaring accounts > Account types.)
+
+It shows a flat list by default. With `--tree`, it uses indentation to show the account hierarchy.
 In flat mode you can add `--drop N` to omit the first few account name components.
 Account names can be depth-clipped with `depth:N` or `--depth N` or `-N`.
 
 Examples:
 
-```shell
+```cli
 $ hledger accounts
 assets:bank:checking
 assets:bank:saving
@@ -24,4 +56,8 @@ expenses:supplies
 income:gifts
 income:salary
 liabilities:debts
+```
+```cli
+$ hledger accounts --undeclared --directives >> $LEDGER_FILE
+$ hledger check accounts
 ```

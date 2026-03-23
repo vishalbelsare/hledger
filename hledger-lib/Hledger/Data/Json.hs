@@ -2,6 +2,7 @@
 JSON instances. Should they be in Types.hs ?
 -}
 
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -19,14 +20,16 @@ import           Data.Aeson
 import           Data.Aeson.Encode.Pretty (Config(..), Indent(..), NumberFormat(..),
                      encodePretty', encodePrettyToTextBuilder')
 --import           Data.Aeson.TH
-import qualified Data.ByteString.Lazy as BL
+import Data.ByteString.Lazy qualified as BL
 import           Data.Decimal (DecimalRaw(..), roundTo)
 import           Data.Maybe (fromMaybe)
-import qualified Data.Text.Lazy    as TL
-import qualified Data.Text.Lazy.Builder as TB
+import Data.Text.Lazy qualified    as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Map qualified as M
 import           Text.Megaparsec (Pos, SourcePos, mkPos, unPos)
 
 import           Hledger.Data.Types
+import           Hledger.Utils.IO (error')
 import           Hledger.Data.Amount (amountsRaw, mixed)
 
 -- To JSON
@@ -67,14 +70,22 @@ instance (Integral a, ToJSON a) => ToJSON (DecimalRaw a) where
   toJSON = object . decimalKV
   toEncoding = pairs . mconcat . decimalKV
 
-decimalKV :: (KeyValue kv, Integral a, ToJSON a) => DecimalRaw a -> [kv]
+decimalKV :: (
+#if MIN_VERSION_aeson(2,2,0)
+  KeyValue e kv,
+#else
+  KeyValue kv,
+#endif
+  Integral a, ToJSON a) => DecimalRaw a -> [kv]
 decimalKV d = let d' = if decimalPlaces d <= 10 then d else roundTo 10 d in
     [ "decimalPlaces"   .= decimalPlaces d'
     , "decimalMantissa" .= decimalMantissa d'
     , "floatingPoint"   .= (realToFrac d' :: Double)
     ]
 
+instance ToJSON CostBasis
 instance ToJSON Amount
+instance ToJSON Rounding
 instance ToJSON AmountStyle
 
 -- Use the same JSON serialisation as Maybe Word8
@@ -94,7 +105,7 @@ instance ToJSON MixedAmount where
   toEncoding = toEncoding . amountsRaw
 
 instance ToJSON BalanceAssertion
-instance ToJSON AmountPrice
+instance ToJSON AmountCost
 instance ToJSON MarketPrice
 instance ToJSON PostingType
 
@@ -102,7 +113,13 @@ instance ToJSON Posting where
   toJSON = object . postingKV
   toEncoding = pairs . mconcat . postingKV
 
-postingKV :: KeyValue kv => Posting -> [kv]
+postingKV ::
+#if MIN_VERSION_aeson(2,2,0)
+  KeyValue e kv
+#else
+  KeyValue kv
+#endif
+  => Posting -> [kv]
 postingKV Posting{..} =
     [ "pdate"             .= pdate
     , "pdate2"            .= pdate2
@@ -125,6 +142,7 @@ instance ToJSON TransactionModifier
 instance ToJSON TMPostingRule
 instance ToJSON PeriodicTransaction
 instance ToJSON PriceDirective
+instance ToJSON EFDay
 instance ToJSON DateSpan
 instance ToJSON Interval
 instance ToJSON Period
@@ -133,31 +151,44 @@ instance ToJSON AccountType
 instance ToJSONKey AccountType
 instance ToJSON AccountDeclarationInfo
 instance ToJSON PayeeDeclarationInfo
+instance ToJSON TagDeclarationInfo
 instance ToJSON Commodity
 instance ToJSON TimeclockCode
 instance ToJSON TimeclockEntry
 instance ToJSON Journal
 
-instance ToJSON Account where
+instance ToJSON BalanceData
+instance ToJSON a => ToJSON (PeriodData a) where
+  toJSON a = object
+    [ "pdpre" .= pdpre a
+    , "pdperiods" .= (M.toList $ pdperiods a)
+    ]
+
+instance ToJSON a => ToJSON (Account a) where
   toJSON = object . accountKV
   toEncoding = pairs . mconcat . accountKV
 
-accountKV :: KeyValue kv => Account -> [kv]
+accountKV ::
+#if MIN_VERSION_aeson(2,2,0)
+  (KeyValue e kv, ToJSON a)
+#else
+  (KeyValue kv, ToJSON a)
+#endif
+  => Account a -> [kv]
 accountKV a =
-    [ "aname"        .= aname a
-    , "aebalance"    .= aebalance a
-    , "aibalance"    .= aibalance a
-    , "anumpostings" .= anumpostings a
-    , "aboring"      .= aboring a
+    [ "aname"            .= aname a
+    , "adeclarationinfo" .= adeclarationinfo a
     -- To avoid a cycle, show just the parent account's name
     -- in a dummy field. When re-parsed, there will be no parent.
-    , "aparent_"     .= maybe "" aname (aparent a)
+    , "aparent_"         .= maybe "" aname (aparent a)
     -- Just the names of subaccounts, as a dummy field, ignored when parsed.
-    , "asubs_"       .= map aname (asubs a)
+    , "asubs_"           .= map aname (asubs a)
     -- The actual subaccounts (and their subs..), making a (probably highly redundant) tree
     -- ,"asubs"        .= asubs a
     -- Omit the actual subaccounts
-    , "asubs"        .= ([]::[Account])
+    , "asubs"            .= ([]::[Account BalanceData])
+    , "aboring"          .= aboring a
+    , "adata"            .= adata a
     ]
 
 instance ToJSON Ledger
@@ -170,7 +201,9 @@ instance FromJSON SourcePos
 instance FromJSON Pos where
   parseJSON = fmap mkPos . parseJSON
 
+instance FromJSON CostBasis
 instance FromJSON Amount
+instance FromJSON Rounding
 instance FromJSON AmountStyle
 
 -- Use the same JSON serialisation as Maybe Word8
@@ -184,16 +217,23 @@ instance FromJSON MixedAmount where
   parseJSON = fmap (mixed :: [Amount] -> MixedAmount) . parseJSON
 
 instance FromJSON BalanceAssertion
-instance FromJSON AmountPrice
+instance FromJSON AmountCost
 instance FromJSON MarketPrice
 instance FromJSON PostingType
 instance FromJSON Posting
 instance FromJSON Transaction
 instance FromJSON AccountDeclarationInfo
+
+instance FromJSON BalanceData
+instance FromJSON a => FromJSON (PeriodData a) where
+  parseJSON = withObject "PeriodData" $ \v -> PeriodData
+    <$> v .: "pdpre"
+    <*> (M.fromList <$> v .: "pdperiods")
+
 -- XXX The ToJSON instance replaces subaccounts with just names.
 -- Here we should try to make use of those to reconstruct the
 -- parent-child relationships.
-instance FromJSON Account
+instance FromJSON a => FromJSON (Account a)
 
 -- Decimal, various attempts
 --
@@ -266,8 +306,8 @@ readJsonFile :: FromJSON a => FilePath -> IO a
 readJsonFile f = do
   bl <- BL.readFile f
   -- PARTIAL:
-  let v = fromMaybe (error $ "could not decode JSON in "++show f++" to target value")
+  let v = fromMaybe (error' $ "could not decode JSON in "++show f++" to target value")
           (decode bl :: Maybe Value)
   case fromJSON v :: FromJSON a => Result a of
-    Error e   -> error e
+    Error e   -> error' e
     Success t -> return t

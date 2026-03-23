@@ -1,13 +1,630 @@
 <!--
- _ _ _     
-| (_) |__  
-| | | '_ \ 
+ _ _ _
+| (_) |__
+| | | '_ \
 | | | |_) |
-|_|_|_.__/ 
-           
+|_|_|_.__/
+
+Breaking changes
+
+Fixes
+
+Improvements
+
 -->
-Internal/api/developer-ish changes in the hledger-lib (and hledger) packages.
+
+API/developer-ish changes in hledger-lib.
 For user-visible changes, see the hledger package changelog.
+
+
+# 1.52 2026-03-20
+
+Breaking changes
+
+- A cost basis field (`acostbasis`) has been added to Amount (to store Ledger/Beancount-style cost basis annotations).
+
+Fixes
+
+- invertAmount: with zero amounts, do nothing instead of failing.
+  Previously `invertAmount` would raise a "Ratio has zero denominator"
+  exception if the amount's quantity was zero. Now it's a no-op in that case.
+  [#2476]
+
+[#2476]: https://github.com/simonmichael/hledger/issues/2476
+
+
+# 1.51.2 2026-01-08
+
+- Allow base 4.22 / ghc 9.14.
+
+# 1.51.1 2025-12-08
+
+# 1.51 2025-12-05
+
+Breaking changes
+
+- Hledger.Data.Balancing: balanceTransaction -> balanceSingleTransaction
+- Hledger.Utils.IO:
+  - inputToHandle -> textToHandle; set utf8 not utf8_bom
+  - readHandlePortably, readHandlePortably' -> hGetContentsPortably
+
+Improvements
+
+- Hledger.Utils.String:
+  quoteForCommandLine now quotes some additional problem characters, and no longer quotes "7".
+  [#2468]
+
+
+# 1.50.5 2025-12-08
+
+# 1.50.4 2025-12-04
+
+# 1.50.3 2025-11-18
+
+# 1.50.2 2025-09-26
+
+# 1.50.1 2025-09-16
+
+# 1.50 2025-09-03
+
+Breaking changes
+
+- hledger now requires at least GHC 9.6 (and base 4.18), to ease maintenance.
+
+Fixes
+
+- Fix liftA2 build error with ghc <9.6 (broken since 1.43.1).
+
+Improvements
+
+- Account now stores balances, one per date period. This enables it do
+  the hard work in MultiBalanceReport.
+  Some new types are created to enable convenient operation of accounts:
+  - `BalanceData` is a type which stores an exclusive balance, inclusive
+    balance, and number of postings. This was previously directly stored
+    in Account, but is now factored into a separate data type.
+  - `PeriodData` is a container which stores date-indexed data, as well as
+    pre-period data. In post cases, this represents the report spans,
+    along with the historical data.
+  - Account becomes polymorphic, allowing customisation of the type of
+    data it stores. This will usually be `BalanceData`, but in
+    `BudgetReport` it can use `These BalanceData BalanceData` to store
+    both actuals and budgets in the same structure. The data structure
+    changes to contain a `PeriodData`, allowing multiperiod accounts.
+  (Stephen Morgan)
+- Hledger.Read: make LatestDatesForFile showable
+- Hledger.Read.Common: accountnamep and modifiedaccountnamep now take a flag to allow semicolons or not
+- Hledger.Utils.IO: getFlag, warnIO, rename exitOnError -> handleExit, improve doc
+- Hledger.Query: matchesCommodity handles all query types, not just cur:, and doesn't match by default
+- Hledger.Data.Amount: move commodityStylesFromAmounts here, drop canonicalStyleFrom
+
+# 1.43.2 2025-06-13
+
+- Hledger.Utils.IO: rename exitOnError -> handleExit, improve doc
+
+
+# 1.43.1 2025-06-04
+
+- Hledger.Query: queryIsAmtOrSym
+
+
+# 1.43 2025-06-01
+
+- Support GHC 9.12.
+
+- Fix doctest suite with ghc-8.10.7 (Thomas Miedema)
+
+- Drop base-compat dependency (Thomas Miedema)
+
+- Added NFData instances for Journal and subcomponents. (Stephen Morgan)
+
+- Hledger.Data.Dates:
+  - renamed parsedateM -> parsedate.
+    M makes me think of monad and is awkward to type for this common helper.
+    Maybe is expected for a parser.
+  - parsedate now also accepts YYYYMMDD format, for convenience in ghci and for parseHledgerVersion.
+    This is more permissive, now parsing many integers successfully; hopefully that won't be a problem.
+    I noted but did not document two user-facing uses, which now also accept YYYYMMDD dates:
+    --value's argument, and import's .latest files.
+
+- Hledger.Data.Journal: journalCommoditiesUsed
+
+- Hledger.Read: more ways to read the default journal:
+  defaultJournalWith, defaultJournalSafely, defaultJournalSafelyWith
+
+- Hledger.Utils.Debug:
+  - Provide simpler, more consistent dbg* names.
+  - A few cases of hledger/hledger-ui debug output which were always
+    traced to stderr or always logged to a file, now consistently follow
+    the policy on whether to trace or log.
+
+- Hledger.Utils.IO:
+  - exitOnError, a helper to clean up unicode errors and GHC error output generally.
+  - make parseYN(A) total
+  - export findPager, getHomeSafe
+
+
+# 1.42.2 2025-05-16
+
+- Require extra >= 1.7.11, fixing the stack8.10.yaml build. (Thomas Miedema)
+
+
+# 1.42.1 2025-03-12
+
+
+# 1.42 2025-03-07
+
+Improvements
+
+- readJournal, when not given a file name, now always assumes it is "-" rather than "(string)".
+  [#2328]
+- Reader's rReadFn has changed type (for the new CSV text encoding feature);
+  it now takes a `Handle` rather than a `Text`, allowing more flexibility.
+- Make test/unittest.hs more buildable; remove PackageImports that was causing
+  trouble for ghci.
+  (Thomas Miedema, [#2337])
+- Added: postingNegate
+- Renamed: negatePostingAmount -> postingNegateMainAmount
+- Refactor Hledger.Write.Html etc, reducing Lucid references.
+  Clarify the HTML lib situation a bit, and clean up some imports.
+  [#2244]
+- Added: dropRawOpt, cliOptsDropArgs
+- Hledger.Data.Amount: showAmountCost(B) now drops leading whitespace.
+
+
+# 1.41 2024-12-09
+
+Breaking changes
+
+- New/refactored modules (Hledger.Write.*) and types (Spreadsheet) to help
+  abstract rendering in various output formats, eg HTML, FODS and beancount.
+  Spreadsheet is an abstraction for tabular reports, in addition to the
+  tabular package we already use; there may be some overlap.
+  (Henning Thielemann)
+
+- Rename displayDepth/prrDepth to displayIndent/prrIndent, and make them
+  correspond to the number of indentation steps.
+  (These are about indentation for rendering, not account depth.) [#2246]
+
+Improvements
+
+- Add Hledger.Data.Currency, currencySymbolToCode, currencyCodeToSymbol
+- AmountFormat: add displayQuotes flag to control enclosing quotes
+- InputOpts: add `posting_account_tags_` flag to control account tags on postings
+- Support ghc 9.10 and base 4.20.
+  Note, when built with ghc 9.10.1, hledger error messages are displayed with two extra trailing newlines.
+
+Other API/doc changes
+
+- Hledger.Utils.IO: cleanup; rgb' now takes Float arguments instead of Word8
+- rename jinferredcommodities to jinferredcommoditystyles
+- rename jcommodities to jdeclaredcommodities
+- move/rename nullsourcepos
+- document isBlockActive, matcherMatches
+- posting*AsLines: fix some docs
+
+
+
+# 1.40 2024-09-09
+
+Breaking changes
+
+- Some constructors of the Interval type have been renamed for clarity.
+- Hledger.Read.CsvUtils has moved to Hledger.Write.Csv. (Henning Thielemann)
+- Tabular report rendering code has been added/reworked to allow new output formats and more reuse. (Henning Thielemann)
+
+Improvements
+
+- Added `journalDbg` debug output helper.
+
+- Allow doclayout 0.5.
+
+# 1.34 2024-06-01
+
+Improvements
+
+- InputOpts has a new `_defer` flag for internal use instead of overusing `strict_`
+- journalCheckBalanceAssertions has moved to JournalChecks
+
+
+# 1.33.1 2024-05-02
+
+- Updates for hledger 1.33.1
+
+
+# 1.33 2024-04-18
+
+Breaking changes
+
+Fixes
+
+- Require process 1.6.19.0+ to avoid any vulnerabilities on Windows from
+  [HSEC-2024-0003](https://haskell.github.io/security-advisories/advisory/HSEC-2024-0003.html).
+  This has also required disabling this package's doctest test suite for the moment.
+
+- A potential Glob/filemanip package conflict in Hledger.Utils.IO now prevented,
+  avoiding build failures.
+
+
+Improvements
+
+- hledger can now be built with GHC 9.8.
+- hledger now requires safe >=0.3.20.
+- fix spanUnion with open-ended dates; add spanExtend [#2177]
+- move readFileStrictly from hledger to Hledger.Utils.IO
+- rename/improve amountSetFullPrecisionUpTo; add mixedAmountSetFullPrecisionUpTo
+- rename Amount's aprice -> acost
+- rename AmountPrice, UnitPrice, TotalPrice -> AmountCost, UnitCost, TotalCost
+- showAmountWithoutPrice             -> showAmountWithoutCost
+- mixedAmountStripPrices             -> mixedAmountStripCosts
+- showMixedAmountWithoutPrice        -> showMixedAmountWithoutCost
+- showMixedAmountOneLineWithoutPrice -> showMixedAmountOneLineWithoutCost
+- rename amountStripPrices           -> amountStripCost, etc
+- rename AmountDisplayOpts -> AmountFormat; add a new flag for symbol display
+- rename noColour          -> defaultFmt
+- rename noCost            -> noCostFmt
+- rename oneLine           -> oneLineFmt
+- rename csvDisplay        -> machineFmt
+- distinguish oneLineFmt and oneLineNoCostFmt; add fullZeroFmt
+- matchedPostingsBeforeAndDuring: improve debug output
+
+[#2177]: https://github.com/simonmichael/hledger/issues/2177
+
+
+# 1.32.3 2024-01-28
+
+- Some API renames ended up in this release, including
+
+  - amountStripPrices    -> amountStripCost
+  - showAmountPrice      -> showAmountCostB
+  - showAmountPriceDebug -> showAmountCostDebug
+
+# 1.32.2 2023-12-31
+
+Breaking changes
+
+- In Hledger.Data.Amount, noPrice is renamed to noCost.
+
+- AmountDisplayOpts has a new displayCommodity flag, controlling commodity symbol display.
+
+Fixes
+
+- Hledger.Utils.Debug.traceOrLog was logging when it should trace and vice versa.
+
+Improvements
+
+- Allow megaparsec 9.6
+
+# 1.32.1 2023-12-07
+
+- readFileStrictly is now provided by Hledger.Utils.IO
+
+# 1.32 2023-12-01
+
+Misc. changes
+
+- styleAmounts is used in more places
+
+- journalApplyCommodityStyles renamed to journalStyleAmounts
+
+- "hard" and "all" rounding strategies have been added
+
+- debug output improvements, eg for precision handling
+
+- Table is now Showable, for debugging
+
+
+# 1.31 2023-09-03
+
+Breaking changes
+
+- There is a new consolidated API for styling amounts, and a
+  convenient HasAmounts typeclass.  AmountStyle's fields have been
+  renamed/reordered more mnemonically, and setting the precision is
+  now optional.  (This simplifies the amount-stylingn code, but
+  complicates the semantics a little. When reading, an unset precision
+  generally behaves like NaturalPrecision.)
+
+- (Possible breaking change):
+  showMixedAmountLinesB, showAmountB, showAmountPrice now preserve
+  commodityful zeroes when rendering. This is intended to affect print output,
+  but it seems possible it might also affect balance and register reports,
+  though our tests show no change in those.
+
+- Renamed: journalAddInferredEquityPostings -> journalInferEquityFromCosts
+
+Misc. changes
+
+- Reports now do a final amount styling pass before rendering.
+
+- groupByDateSpan code cleanup (Jay Neubrand)
+
+- Allow aeson 2.2, megaparsec 9.5
+
+# 1.30 2023-06-01
+
+Breaking changes
+
+- dropped: Hledger.Data.RawOptions.inRawOpts
+
+Misc. changes
+
+- added more terminal size, ANSI style/color helpers in Hledger.Utils.IO
+  (and therefore Hledger and Hledger.Cli.Script):
+
+      getTerminalHeightWidth
+      getTerminalHeight
+      getTerminalWidth
+      bold'
+      faint'
+      black'
+      red'
+      green'
+      yellow'
+      blue'
+      magenta'
+      cyan'
+      white'
+      brightBlack'
+      brightRed'
+      brightGreen'
+      brightYellow'
+      brightBlue'
+      brightMagenta'
+      brightCyan'
+      brightWhite'
+      rgb'
+      multicol
+      expandGlob
+      sortByModTime
+
+# 1.29.2 2023-04-07
+
+# 1.29.1 2023-03-16
+
+- Hledger.Utils.String:
+
+       added:
+       strip1Char
+       stripBy
+       strip1By
+
+- Allow building with GHC 9.6.1; add base-compat (#2011)
+
+# 1.29 2023-03-11
+- added terminal colour detection helpers:
+  terminalIsLight
+  terminalLightness
+  terminalFgColor
+  terminalBgColor
+
+- Hledger.Data.RawOptions: add unsetboolopt
+
+- add journalMarkRedundantCosts to help with balancing
+
+- journalInferCosts -> journalInferCostsFromEquity
+
+- `BalancingOpts{infer_transaction_prices_ -> infer_balancing_costs_}`
+
+- Hledger.Data.Balancing: inferBalancingPrices -> transactionInferBalancingCosts
+
+- Hledger.Data.Balancing: inferBalancingAmount -> transactionInferBalancingAmount
+
+- Hledger.Data.Journal: transactionAddPricesFromEquity -> transactionInferCostsFromEquity
+
+- Hledger.Data.Journal: journalAddPricesFromEquity -> journalInferCosts
+
+- Hledger.Data.Dates: intervalStartBefore -> intervalBoundaryBefore
+
+- Hledger.Read.Common: cleaned up some amount parsers; describe Ledger lot notation
+  ```
+  amountpwithmultiplier -> amountp'
+  amountpnolotpricesp   -> amountnobasisp
+  amountwithoutpricep   -> simpleamountp
+  priceamountp          -> costp
+  ```
+
+- depend on text-ansi
+
+
+# 1.28 2022-12-01
+
+- Hledger.Utils.Debug's debug logging helpers have been unified.
+  The "trace or log" functions log to stderr by default, or to a file
+  if ",logging" is appended to the program name (using withProgName). 
+  The debug log file is PROGNAME.log (changed from debug.log).
+
+- Moved from Hledger.Utils.Debug to Hledger.Utils.Parse:
+  traceParse
+  traceParseAt
+  dbgparse
+
+- Moved from Hledger.Utils.Debug to Hledger.Utils.Print:
+  pshow
+  pshow'
+  pprint
+  pprint'
+  colorOption
+  useColorOnStdout
+  useColorOnStderr
+  outputFileOption
+  hasOutputFile
+
+- Rename Hledger.Utils.Print -> Hledger.Utils.IO, consolidate utils there.
+
+- Hledger.Utils cleaned up.
+
+- Hledger.Data.Amount: showMixedAmountOneLine now also shows costs.
+  Note that different costs are kept separate in amount arithmetic.
+
+- Hledger.Read.Common: rename/add amount parsing helpers.
+
+  added:
+   parseamount
+   parseamount'
+   parsemixedamount
+   parsemixedamount'
+
+  removed:
+   amountp'
+   mamountp'
+
+- Hledger.Utils.Parse:
+  export customErrorBundlePretty, 
+  for pretty-printing hledger parse errors.
+
+- Support megaparsec 9.3. (Felix Yan)
+
+- Support GHC 9.4.
+
+- Update cabal files to match hpack 0.35/stack 2.9
+
+
+# 1.27 2022-09-01
+
+Breaking changes
+
+- Support for GHC 8.6 and 8.8 has been dropped.
+  hledger now requires GHC 8.10 or newer.
+
+- Hledger.Data.Amount: `amount` has been dropped; use `nullamt` instead.
+
+- journal*AccountQuery functions have been dropped; use a type: query instead.
+  cbcsubreportquery no longer takes Journal as an argument.
+  (#1921)
+
+Misc. changes
+
+- Hledger.Utils.Debug now re-exports Debug.Breakpoint from the
+  breakpoint library, so that breakpoint's helpers can be used easily
+  during development.
+
+- Hledger.Utils.Debug:
+  dlog has been replaced by more reliable functions for debug-logging
+  to a file (useful for debugging TUI apps like hledger-ui):
+
+  dlogTrace
+  dlogTraceAt
+  dlogAt
+  dlog0
+  dlog1
+  dlog2
+  dlog3
+  dlog4
+  dlog5
+  dlog6
+  dlog7
+  dlog8
+  dlog9
+
+- Hledger.Utils.Debug: pprint' and pshow' have been added,
+  forcing monochrome output.
+
+- Hledger.Utils.String: add quoteForCommandLine
+
+- Hledger.Data.Errors: export makeBalanceAssertionErrorExcerpt
+
+- Hledger.Utils.Parse: export HledgerParseErrors
+
+- Debug logging from journalFilePath and the include directive will
+  now show "(unknown)" instead of an empty string.
+
+# 1.26.1 2022-07-11
+
+- require safe 0.3.19+ to avoid deprecation warning
+
+# 1.26 2022-06-04
+
+Breaking changes
+
+- readJournal, readJournalFile, readJournalFiles now return
+  `ExceptT String IO a` instead of `IO (Either String a)`.
+  Internally, this increases composability and avoids some ugly case handling.
+  It means that these must now be evaluated with `runExceptT`.
+  That can be imported from `Control.Monad.Except` in the `mtl` package,
+  but `Hledger.Read` also re-exports it for convenience.
+
+  New variants readJournal', readJournalFiles', readJournalFile' are
+  also provided; these are like the old functions but more convenient,
+  assuming default input options and needing one less argument.
+  (Stephen Morgan)
+
+- parseAndFinaliseJournal' (a variant of parseAndFinaliseJournal) has been removed. 
+  In the unlikely event you needed it in your code, you can replace:
+  ```haskell
+  parseAndFinaliseJournal' parser iopts fp t
+  ```
+  with:
+  ```haskell
+  initialiseAndParseJournal parser iopts fp t
+  >>= liftEither . journalApplyAliases (aliasesFromOpts iopts)
+  >>= journalFinalise iopts fp t
+  ```
+
+- Some parsers have been generalised from JournalParser to TextParser.
+  (Stephen Morgan)
+
+Misc. changes
+
+- Allow doclayout 0.4.
+
+- Our doctests now run with GHC 9.2+ only, to avoid doctest issues.
+
+- Hledger.Data.JournalChecks: some Journal checks have been moved and renamed:
+  journalCheckAccounts,
+  journalCheckCommodities,
+  journalCheckPayees
+  
+- Hledger.Data.Errors: new error formatting helpers
+  makeTransactionErrorExcerpt,
+  makePostingErrorExcerpt,
+  transactionFindPostingIndex
+
+- HledgerParseErrors is a new type alias for our parse errors.
+  CustomErr has been renamed to HledgerParseErrorData.
+
+- Hledger.Query: added
+  matchesQuery,
+  queryIsCode,
+  queryIsTransactionRelated
+
+- Improve ergonomics of SmartDate constructors. 
+  (Stephen Morgan)
+
+- Hledger.Utils: Add a helper function numDigitsInt to get the number
+  of digits in an integer, which has a surprising number of ways to
+  get it wrong.
+  ([#1813](https://github.com/simonmichael/hledger/issues/1813) (Stephen Morgan)
+
+# 1.25 2022-03-04
+
+- hledger-lib now builds with GHC 9.2 and latest deps. 
+  ([#1774](https://github.com/simonmichael/hledger/issues/1774)
+
+- Journal has a new jaccounttypes map.
+  The journalAccountType lookup function makes it easy to check an account's type.
+  The journalTags and journalInheritedTags functions look up an account's tags.
+  Functions like journalFilterPostings and journalFilterTransactions,
+  and new matching functions matchesAccountExtra, matchesPostingExtra
+  and matchesTransactionExtra, use these to allow more powerful matching
+  that is aware of account types and tags.
+
+- Journal has a new jdeclaredaccounttags field
+  for easy lookup of account tags.
+  Query.matchesTaggedAccount is a tag-aware version of matchesAccount.
+
+- Some account name functions have moved from Hledger.Data.Posting
+  to Hledger.Data.AccountName:
+  accountNamePostingType, accountNameWithPostingType, accountNameWithoutPostingType,
+  joinAccountNames, concatAccountNames, accountNameApplyAliases, accountNameApplyAliasesMemo.
+
+- Renamed: CommodityLayout to Layout.
+
+# 1.24.1 2021-12-10
+
+Improvements
+
+- Added: filterQueryOrNotQuery.
 
 # 1.24 2021-12-01
 
@@ -836,16 +1453,16 @@ including:
 - add support for GHC 8.8, base-compat 0.11 (#1090)
 
   We are now using the new fail from the MonadFail class, which we
-  always import qualified as Fail.fail, from base-compat-batteries
+  always import as qualified Fail.fail, from base-compat-batteries
   Control.Monad.Fail.Compat to work with old GHC versions. If old fail
   is needed (shouldn't be) it should be imported qualified as
   Prelude.Fail, using imports such as:
 
       import Prelude hiding (fail)
-      import qualified Prelude (fail)
+      import Prelude qualified (fail)
       import Control.Monad.State.Strict hiding (fail)
       import "base-compat-batteries" Prelude.Compat hiding (fail)
-      import qualified "base-compat-batteries" Control.Monad.Fail.Compat as Fail
+      import "base-compat-batteries" qualified Control.Monad.Fail.Compat as Fail
 
 - hledger and hledger-lib unit tests have been ported to tasty.
 

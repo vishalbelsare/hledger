@@ -5,13 +5,13 @@
 
 {- Construct two balance reports for two different time periods and render them side by side -}
 
-{-# OPTIONS_GHC -Wno-missing-signatures -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -Wno-missing-signatures #-}
 
 import System.Environment (getArgs)
-import Hledger.Cli
-import qualified Data.Map as M
+import Hledger.Cli.Script
+import Data.Map qualified as M
 import Data.Map.Merge.Strict
-import qualified Data.Text.Lazy.IO as TL
+import Data.Text.Lazy.IO qualified as TL
 
 appendReports :: MultiBalanceReport -> MultiBalanceReport -> MultiBalanceReport
 appendReports r1 r2 =
@@ -69,5 +69,5 @@ main = do
   where
     mbReport args = do
       opts@CliOpts{reportspec_=rspec} <- getHledgerCliOpts' cmdmode args
-      report <- withJournalDo opts (return . multiBalanceReport rspec)
+      report <- withJournal opts (return . multiBalanceReport rspec)
       return (rspec,report)

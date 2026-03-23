@@ -12,22 +12,50 @@ module Hledger.Cli.Commands.Commodities (
  ,commodities
 ) where
 
-import qualified Data.Set as S
-import qualified Data.Text.IO as T
+import Data.Map qualified as M
+import Data.Set qualified as S
+import Data.Text.IO qualified as T
+import System.Console.CmdArgs.Explicit
 
 import Hledger
 import Hledger.Cli.CliOptions
+import Data.List.Extra (nubSort)
+import Data.List ((\\))
 
 
 -- | Command line options for this command.
 commoditiesmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Commodities.txt")
-  []
+  [flagNone ["used"]         (setboolopt "used")       "list commodities used"
+  ,flagNone ["declared"]     (setboolopt "declared")   "list commodities declared"
+  ,flagNone ["undeclared"]   (setboolopt "undeclared") "list commodities used but not declared"
+  ,flagNone ["unused"]       (setboolopt "unused")     "list commodities declared but not used"
+  ,flagNone ["find"]         (setboolopt "find")       "list the first commodity matched by the first argument (a case-insensitive infix regexp)"
+  ]
   [generalflagsgroup2]
-  []
-  ([], Nothing)
+  confflags
+  ([], Just $ argsFlag "[QUERY..]")
 
 commodities :: CliOpts -> Journal -> IO ()
-commodities _copts =
-  -- TODO support --declared/--used like accounts, payees
-  mapM_ T.putStrLn . S.filter (/= "AUTO") . journalCommodities
+commodities opts@CliOpts{rawopts_=rawopts, reportspec_=ReportSpec{_rsQuery=query}} j = do
+  let
+    filt = filter (matchesCommodity query)
+    used       = dbg5 "used"       $ S.toList $ journalCommoditiesFromPriceDirectives j <> journalCommoditiesFromTransactions j
+    declared'  = dbg5 "declared"   $ M.keys $ jdeclaredcommodities j
+    unused     = dbg5 "unused"     $ declared' \\ used
+    undeclared = dbg5 "undeclared" $ used     \\ declared'
+    all'       = dbg5 "all"        $ nubSort $ concat [
+       journalCommoditiesDeclared j
+      ,map pdcommodity $ jpricedirectives j          -- gets the first symbol from P directives
+      ,map acommodity (S.toList $ journalAmounts j)  -- includes the second symbol from P directives
+      ]
+    found = dbg5 "found" $ findMatchedByArgument rawopts "commodity" all'
+
+  mapM_ T.putStrLn $
+    case declarablesSelectorFromOpts opts of
+      Nothing         -> filt all'
+      Just Used       -> filt used
+      Just Declared   -> filt declared'
+      Just Undeclared -> filt undeclared
+      Just Unused     -> filt unused
+      Just Find       -> [found]

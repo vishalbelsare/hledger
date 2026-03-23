@@ -10,11 +10,12 @@ module Hledger.Web.Handler.EditR
   , postEditR
   ) where
 
+import Control.Monad.Except (runExceptT)
 import Hledger.Web.Import
 import Hledger.Web.Widget.Common
        (fromFormSuccess, helplink, journalFile404, writeJournalTextIfValidAndChanged)
 
-editForm :: FilePath -> Text -> Markup -> MForm Handler (FormResult Text, Widget)
+editForm :: FilePath -> Text -> Form Text
 editForm f txt =
   identifyForm "edit" $ \extra -> do
     (tRes, tView) <- mreq textareaField fs (Just (Textarea txt))
@@ -30,13 +31,13 @@ getEditR f = do
 postEditR :: FilePath -> Handler ()
 postEditR f = do
   checkServerSideUiEnabled
-  VD {caps, j} <- getViewData
-  when (CapManage `notElem` caps) (permissionDenied "Missing the 'manage' capability")
+  VD {j} <- getViewData
+  require EditPermission
 
   (f', txt) <- journalFile404 f j
   ((res, view), enctype) <- runFormPost (editForm f' txt)
   newtxt <- fromFormSuccess (showForm view enctype) res
-  writeJournalTextIfValidAndChanged f newtxt >>= \case
+  runExceptT (writeJournalTextIfValidAndChanged f newtxt) >>= \case
     Left e -> do
       setMessage $ "Failed to load journal: " <> toHtml e
       showForm view enctype

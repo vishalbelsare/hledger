@@ -1,8 +1,10 @@
+# * JSON output
+
 <
 2019-1-1
   (a)  1.0 AAA
 
-# 1. Test the json output for register reports
+# ** 1. Test the json output for register reports
 $ hledger -f- reg --output-format=json
 [
   [
@@ -14,7 +16,8 @@ $ hledger -f- reg --output-format=json
       "pamount": [
         {
           "acommodity": "AAA",
-          "aprice": null,
+          "acost": null,
+          "acostbasis": null,
           "aquantity": {
             "decimalMantissa": 10,
             "decimalPlaces": 1,
@@ -23,9 +26,10 @@ $ hledger -f- reg --output-format=json
           "astyle": {
             "ascommodityside": "R",
             "ascommodityspaced": true,
-            "asdecimalpoint": ".",
+            "asdecimalmark": ".",
             "asdigitgroups": null,
-            "asprecision": 1
+            "asprecision": 1,
+            "asrounding": "HardRounding"
           }
         }
       ],
@@ -42,7 +46,8 @@ $ hledger -f- reg --output-format=json
     [
       {
         "acommodity": "AAA",
-        "aprice": null,
+        "acost": null,
+        "acostbasis": null,
         "aquantity": {
           "decimalMantissa": 10,
           "decimalPlaces": 1,
@@ -51,16 +56,17 @@ $ hledger -f- reg --output-format=json
         "astyle": {
           "ascommodityside": "R",
           "ascommodityspaced": true,
-          "asdecimalpoint": ".",
+          "asdecimalmark": ".",
           "asdigitgroups": null,
-          "asprecision": 1
+          "asprecision": 1,
+          "asrounding": "HardRounding"
         }
       }
     ]
   ]
 ]
 
-# 2. Test the json output for balance reports
+# ** 2. Test the json output for balance reports
 $ hledger -f- bal --output-format=json
 [
   [
@@ -71,7 +77,8 @@ $ hledger -f- bal --output-format=json
       [
         {
           "acommodity": "AAA",
-          "aprice": null,
+          "acost": null,
+          "acostbasis": null,
           "aquantity": {
             "decimalMantissa": 10,
             "decimalPlaces": 1,
@@ -80,9 +87,10 @@ $ hledger -f- bal --output-format=json
           "astyle": {
             "ascommodityside": "R",
             "ascommodityspaced": true,
-            "asdecimalpoint": ".",
+            "asdecimalmark": ".",
             "asdigitgroups": null,
-            "asprecision": 1
+            "asprecision": 1,
+            "asrounding": "HardRounding"
           }
         }
       ]
@@ -91,7 +99,8 @@ $ hledger -f- bal --output-format=json
   [
     {
       "acommodity": "AAA",
-      "aprice": null,
+      "acost": null,
+      "acostbasis": null,
       "aquantity": {
         "decimalMantissa": 10,
         "decimalPlaces": 1,
@@ -100,9 +109,10 @@ $ hledger -f- bal --output-format=json
       "astyle": {
         "ascommodityside": "R",
         "ascommodityspaced": true,
-        "asdecimalpoint": ".",
+        "asdecimalmark": ".",
         "asdigitgroups": null,
-        "asprecision": 1
+        "asprecision": 1,
+        "asrounding": "HardRounding"
       }
     }
   ]

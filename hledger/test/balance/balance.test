@@ -1,6 +1,6 @@
-# 1.
-hledger -f sample.journal balance --tree
->>>
+# * balance command
+# ** 1.
+$ hledger -f sample.journal balance --tree
                  $-1  assets
                   $1    bank:saving
                  $-2    cash
@@ -13,22 +13,18 @@ hledger -f sample.journal balance --tree
                   $1  liabilities:debts
 --------------------
                    0  
->>>=0
 
-# 2.
-hledger -f sample.journal balance --tree o
->>>
+# ** 2.
+$ hledger -f sample.journal balance --tree o
                   $1  expenses:food
                  $-2  income
                  $-1    gifts
                  $-1    salary
 --------------------
                  $-1  
->>>=0
 
-# 3. Period reporting works for a specific year
-hledger -f - balance -b 2016 -e 2017 -N
-<<<
+# ** 3. Period reporting works for a specific year
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -48,16 +44,13 @@ hledger -f - balance -b 2016 -e 2017 -N
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - balance -b 2016 -e 2017 -N
              $-40.00  assets:checking
               $50.00  expense:hosting
              $-10.00  revenue:clients:B
->>>2
->>>= 0
 
-# 4. Period reporting works for two years
-hledger -f - balance --tree -b 2015 -e 2017 -N
-<<<
+# ** 4. Period reporting works for two years
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -77,18 +70,15 @@ hledger -f - balance --tree -b 2015 -e 2017 -N
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - balance --tree -b 2015 -e 2017 -N
            $9,960.00  assets:checking
               $50.00  expense:hosting
          $-10,010.00  revenue:clients
          $-10,000.00    A
              $-10.00    B
->>>2
->>>= 0
 
-# 5. Period reporting works for one month
-hledger -f - balance --tree -b 2015/11 -e 2015/12 -N
-<<<
+# ** 5. Period reporting works for one month
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -108,16 +98,13 @@ hledger -f - balance --tree -b 2015/11 -e 2015/12 -N
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - balance --tree -b 2015/11 -e 2015/12 -N
                    0  assets
           $10,000.00    checking
          $-10,000.00    receivables
->>>2
->>>= 0
 
-# 6. Period reporting works for one month in another year
-hledger -f - balance -b 2016/10 -e 2016/11
-<<<
+# ** 6. Period reporting works for one month in another year
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -137,63 +124,154 @@ hledger -f - balance -b 2016/10 -e 2016/11
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - balance -b 2016/10 -e 2016/11
 --------------------
                    0  
->>>2
->>>= 0
 
-# 7. Default CSV output. 
-hledger -f - balance -N --output-format=csv
-<<<
+# ** 7. Default CSV output. 
+<
 2021-01-01 Test
     Assets:ABC   "AB.C" 1
     Assets:Cash       -$1
->>>
+$ hledger -f - balance -N --output-format=csv
 "account","balance"
 "Assets:ABC","""AB.C"" 1"
 "Assets:Cash","$-1"
->>>= 0
 
-# 8. CSV output always shows full account names, even in tree mode (#1565).
-hledger -f - balance -N --output-format=csv --tree
-<<<
+# ** 8. CSV output in tree mode.
+<
 2021-01-01 Test
     Assets:ABC   "AB.C" 1
     Assets:Cash       -$1
->>>
+$ hledger -f - balance -N --output-format=csv --tree
 "account","balance"
 "Assets","$-1, ""AB.C"" 1"
-"Assets:ABC","""AB.C"" 1"
-"Assets:Cash","$-1"
->>>= 0
+"  ABC","""AB.C"" 1"
+"  Cash","$-1"
 
-# 9. --declared includes all declared leaf accounts, even if they have no postings.
+# ** 9. CSV output always does not show thousands separators
+<
+2021-01-01 Test
+    Assets:ABC    $10 000.00
+    Assets:Cash  -$10 000.00
+$ hledger -f - balance -N --output-format=csv
+"account","balance"
+"Assets:ABC","$10000.00"
+"Assets:Cash","$-10000.00"
+
+# ** 10. --declared includes all declared leaf accounts, even if they have no postings.
 # They are filtered, depth-clipped, and form trees like the others.
-hledger -f - balance -NE --declared --tree --depth 2 a
-<<<
+<
 account a
 account a:aa
 account a:ab
 account a:ac:aca
 account b
->>>
+$ hledger -f - balance -NE --declared --tree --depth 2 a
                    0  a
                    0    aa
                    0    ab
->>>= 0
+                   0    ac
 
-# 10. In list mode we can see that non-leaf declared accounts are excluded.
-hledger -f - balance -NE --declared --flat
-<<<
-account a
-account a:aa
-account a:ab
-account a:ac:aca
-account b
->>>
+# ** 11. In list mode we can see that declared accounts are included, even if they have no postings.
+$ hledger -f - balance -NE --declared --flat
+                   0  a
                    0  a:aa
                    0  a:ab
                    0  a:ac:aca
                    0  b
->>>= 0
+
+# ** 12. not:ACCT queries work with declared accounts.
+$ hledger -f - balance -NE --declared not:a
+                   0  b
+
+# ** 13. An empty periodic report in HTML output does not break.
+<
+$ hledger -f- bal -M -O html
+> //
+
+# ** 14. An empty totals column in HTML output does not break (#1933).
+<
+$ hledger -f- bal -MT -O html
+> //
+
+# ** 15. --count counts postings.
+<
+2023-01-01
+  a      10
+  a:aa   20
+  b
+$ hledger -f- bal --count
+                   1  a
+                   1  a:aa
+                   1  b
+--------------------
+                   3  
+
+# ** 16. --count counts clipped postings.
+$ hledger -f- bal --count -1
+                   2  a
+                   1  b
+--------------------
+                   3  
+
+# ** 17. --count counts inclusive postings with --tree.
+$ hledger -f- bal --count --tree
+                   2  a
+                   1    aa
+                   1  b
+--------------------
+                   3  
+
+# ** 18. Make sure that balance --flat --empty does not display implied
+# accounts (i.e. those with no postings, like "assets", here), but does show
+# accounts that have postings with zero balance (like "assets:bank:checking"
+# here).
+$ hledger -f sample.journal balance --flat --empty
+                   0  assets:bank:checking
+                  $1  assets:bank:saving
+                 $-2  assets:cash
+                  $1  expenses:food
+                  $1  expenses:supplies
+                 $-1  income:gifts
+                 $-1  income:salary
+                  $1  liabilities:debts
+--------------------
+                   0  
+
+# ** 19. Shows zero if period starts after all transactions
+$ hledger -f sample.journal balance -b 3000-01-01
+--------------------
+                   0  
+
+# ** 20. Shows zero if period ends before all transactions
+$ hledger -f sample.journal balance -e 1000-01-01
+--------------------
+                   0  
+
+# ** 20. Shows zero if period starts and ends before all transactions
+$ hledger -f sample.journal balance -b 1000-01-01 -e 1000-01-02
+--------------------
+                   0  
+
+# ** 19. Shows zero on empty journal
+<
+$ hledger -f- balance
+--------------------
+                   0  
+
+# ** 21. Ordering of accounts with no postings is preserved when --declared and --empty are used
+<
+account a
+account b
+account c
+
+2025-01-01 txn
+    a       1
+    c      -1
+$ hledger -f - balance --empty --declared
+                   1  a
+                   0  b
+                  -1  c
+--------------------
+                   0  

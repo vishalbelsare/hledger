@@ -1,26 +1,78 @@
 {- | UIState operations. -}
 
-{-# LANGUAGE NamedFieldPuns    #-}
-{-# LANGUAGE OverloadedStrings #-}
-
 module Hledger.UI.UIState
+(uiState
+,uiShowStatus
+,setFilter
+,setMode
+,setReportPeriod
+,showMinibuffer
+,closeMinibuffer
+,toggleCleared
+,toggleConversionOp
+,toggleIgnoreBalanceAssertions
+,toggleEmpty
+,toggleForecast
+,toggleHistorical
+,togglePending
+,toggleUnmarked
+,toggleReal
+,toggleTree
+,setTree
+,setList
+,toggleValue
+,reportPeriod
+,shrinkReportPeriod
+,growReportPeriod
+,nextReportPeriod
+,previousReportPeriod
+,resetReportPeriod
+,moveReportPeriodToDate
+,getDepth
+,setDepth
+,decDepth
+,incDepth
+,resetDepth
+,popScreen
+,pushScreen
+,enableForecast
+,resetFilter
+,resetScreens
+,regenerateScreens
+)
 where
 
 import Brick.Widgets.Edit
 import Data.Bifunctor (first)
 import Data.Foldable (asum)
 import Data.Either (fromRight)
-import Data.List ((\\), foldl', sort)
+import Data.List ((\\), sort)
 import Data.Maybe (fromMaybe)
 import Data.Semigroup (Max(..))
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Text.Zipper (gotoEOL)
 import Data.Time.Calendar (Day)
 import Lens.Micro ((^.), over, set)
+import Safe
 
 import Hledger
 import Hledger.Cli.CliOptions
 import Hledger.UI.UITypes
+import Hledger.UI.UIOptions (UIOpts(uoCliOpts))
+import Hledger.UI.UIScreens (screenUpdate)
+import Hledger.UI.UIUtils (showScreenId, showScreenStack)
+
+-- | Make an initial UI state with the given options, journal,
+-- parent screen stack if any, and starting screen.
+uiState :: UIOpts -> Journal -> [Screen] -> Screen -> UIState
+uiState uopts j prevscrs scr = UIState {
+   astartupopts  = uopts
+  ,aopts         = uopts
+  ,ajournal      = j
+  ,aMode         = Normal
+  ,aScreen      = scr
+  ,aPrevScreens = prevscrs
+  }
 
 -- | Toggle between showing only unmarked items or all items.
 toggleUnmarked :: UIState -> UIState
@@ -66,7 +118,7 @@ toggleStatus1 s ss = if ss == [s] then [] else [s]
 -- pressing Y after first or second step starts new cycle:
 -- [u] P [p]
 -- [pc] P [p]
--- toggleStatus2 s ss
+-- toggleStatus s ss
 --   | ss == [s]            = complement [s]
 --   | ss == complement [s] = []
 --   | otherwise            = [s]  -- XXX assume only three values
@@ -97,19 +149,26 @@ toggleEmpty :: UIState -> UIState
 toggleEmpty = over empty__ not
 
 -- | Toggle between showing the primary amounts or costs.
-toggleCost :: UIState -> UIState
-toggleCost = over cost toggleCostMode
+toggleConversionOp :: UIState -> UIState
+toggleConversionOp ui = (over value valOff) (over conversionop toggleCostMode ui)
   where
-    toggleCostMode Cost   = NoCost
-    toggleCostMode NoCost = Cost
+    toggleCostMode Nothing               = Just ToCost
+    toggleCostMode (Just NoConversionOp) = Just ToCost
+    toggleCostMode (Just ToCost)         = Just NoConversionOp
+    valOff _                             = Nothing
 
--- | Toggle between showing primary amounts or default valuation.
+-- | Toggle between showing primary amounts or values (using valuation specified at startup, or a default).
 toggleValue :: UIState -> UIState
-toggleValue = over value valuationToggleValue
+toggleValue ui = (over conversionop costOff) (over value (valuationToggleValue mstartupvaluation0) ui)
   where
-    -- | Basic toggling of -V, for hledger-ui.
-    valuationToggleValue (Just (AtEnd _)) = Nothing
-    valuationToggleValue _                = Just $ AtEnd Nothing
+    mstartupvaluation0 = value_ $ _rsReportOpts $ reportspec_ $ uoCliOpts $ astartupopts ui
+    mdefvaluation = Just (AtEnd Nothing)
+    -- valuationToggleValue (maybe startupvaluation) (maybe currentvaluation) = ...
+    valuationToggleValue Nothing           Nothing  = mdefvaluation
+    valuationToggleValue Nothing           (Just _) = Nothing
+    valuationToggleValue mstartupvaluation Nothing  = mstartupvaluation
+    valuationToggleValue _                 (Just _) = Nothing
+    costOff _ = Just NoConversionOp
 
 -- | Set hierarchic account tree mode.
 setTree :: UIState -> UIState
@@ -143,25 +202,24 @@ toggleForecast _d ui = set forecast newForecast ui
   where
     newForecast = case ui^.forecast of
       Just _  -> Nothing
-      Nothing -> enableForecastPreservingPeriod ui (ui^.cliOpts) ^. forecast
+      Nothing -> enableForecast (astartupopts ui) (ui^.cliOpts) ^. forecast
 
--- | Ensure this CliOpts enables forecasted transactions.
--- If a forecast period was specified in the old CliOpts,
--- or in the provided UIState's startup options,
--- it is preserved.
-enableForecastPreservingPeriod :: UIState -> CliOpts -> CliOpts
-enableForecastPreservingPeriod ui copts = set forecast mforecast copts
+-- | Enable forecasting in this CliOpts.
+-- If it previously specified a forecast period, or else if the given ui startup options did,
+-- preserve that as the forecast period.
+enableForecast :: UIOpts -> CliOpts -> CliOpts
+enableForecast startopts currentopts = set forecast mforecast currentopts
   where
-    mforecast = asum [mprovidedforecastperiod, mstartupforecastperiod, mdefaultforecastperiod]
+    mforecast = asum [mcurrentforecastperiod, mstartupforecastperiod, mdefaultforecastperiod]
       where
-        mprovidedforecastperiod = copts ^. forecast
-        mstartupforecastperiod  = astartupopts ui ^. forecast
-        mdefaultforecastperiod  = Just nulldatespan
+        mcurrentforecastperiod = currentopts ^. forecast
+        mstartupforecastperiod = startopts ^. forecast
+        mdefaultforecastperiod = Just nulldatespan
 
 -- | Toggle between showing all and showing only real (non-virtual) items.
 toggleReal :: UIState -> UIState
 toggleReal = fromRight err . overEither real not  -- PARTIAL:
-  where err = error "toggleReal: updating Real should not result in an error"
+  where err = error' "toggleReal: updating Real should not result in an error"
 
 -- | Toggle the ignoring of balance assertions.
 toggleIgnoreBalanceAssertions :: UIState -> UIState
@@ -205,11 +263,11 @@ setReportPeriod p = updateReportPeriod (const p)
 -- | Update report period by a applying a function.
 updateReportPeriod :: (Period -> Period) -> UIState -> UIState
 updateReportPeriod updatePeriod = fromRight err . overEither period updatePeriod  -- PARTIAL:
-  where err = error "updateReportPeriod: updating period should not result in an error"
+  where err = error' "updateReportPeriod: updating period should not result in an error"
 
 -- | Apply a new filter query, or return the failing query.
 setFilter :: String -> UIState -> Either String UIState
-setFilter s = first (const s) . setEither querystring (words'' prefixes $ T.pack s)
+setFilter s = first (const s) . setEither querystring (words'' queryprefixes $ T.pack s)
 
 -- | Reset some filters & toggles.
 resetFilter :: UIState -> UIState
@@ -217,13 +275,13 @@ resetFilter = set querystringNoUpdate [] . set realNoUpdate False . set statuses
             . set empty__ True  -- set period PeriodAll
             . set rsQuery Any . set rsQueryOpts []
 
--- | Reset all options state to exactly what it was at startup
--- (preserving any command-line options/arguments).
-resetOpts :: UIState -> UIState
-resetOpts ui@UIState{astartupopts} = ui{aopts=astartupopts}
+-- -- | Reset all options state to exactly what it was at startup
+-- -- (preserving any command-line options/arguments).
+-- resetOpts :: UIState -> UIState
+-- resetOpts ui@UIState{astartupopts} = ui{aopts=astartupopts}
 
 resetDepth :: UIState -> UIState
-resetDepth = updateReportDepth (const Nothing)
+resetDepth = updateReportDepth (const mempty)
 
 -- | Get the maximum account depth in the current journal.
 maxDepth :: UIState -> Int
@@ -234,34 +292,38 @@ maxDepth UIState{ajournal=j} = getMax . foldMap (Max . accountNameLevel) $ journ
 decDepth :: UIState -> UIState
 decDepth ui = updateReportDepth dec ui
   where
-    dec (Just d) = Just $ max 0 (d-1)
-    dec Nothing  = Just $ maxDepth ui - 1
+    dec (DepthSpec (Just d) _) = DepthSpec (Just $ max 0 (d-1)) []
+    dec (DepthSpec Nothing  _) = DepthSpec (Just $ maxDepth ui - 1) []
 
 -- | Increment the current depth limit. If this makes it equal to the
 -- the maximum account depth, remove the depth limit.
 incDepth :: UIState -> UIState
-incDepth = updateReportDepth (fmap succ)
+incDepth = updateReportDepth inc
+  where
+    inc (DepthSpec Nothing  _) = DepthSpec Nothing []
+    inc (DepthSpec (Just d) _) = DepthSpec (Just $ d + 1) []
 
 -- | Set the current depth limit to the specified depth, or remove the depth limit.
 -- Also remove the depth limit if the specified depth is greater than the current
 -- maximum account depth. If the specified depth is negative, reset the depth limit
 -- to whatever was specified at uiartup.
 setDepth :: Maybe Int -> UIState -> UIState
-setDepth mdepth = updateReportDepth (const mdepth)
+setDepth mdepth = updateReportDepth (const $ DepthSpec mdepth [])
 
 getDepth :: UIState -> Maybe Int
-getDepth = (^.depth)
+getDepth = dsFlatDepth . (^.depth)
 
 -- | Update report depth by a applying a function. If asked to set a depth less
 -- than zero, it will leave it unchanged.
-updateReportDepth :: (Maybe Int -> Maybe Int) -> UIState -> UIState
+updateReportDepth :: (DepthSpec -> DepthSpec) -> UIState -> UIState
 updateReportDepth updateDepth ui = over reportSpec update ui
   where
-    update = fromRight (error "updateReportDepth: updating depth should not result in an error")  -- PARTIAL:
-           . updateReportSpecWith (\ropts -> ropts{depth_=updateDepth (depth_ ropts) >>= clipDepth ropts})
-    clipDepth ropts d | d < 0            = depth_ ropts
-                      | d >= maxDepth ui = Nothing
-                      | otherwise        = Just d
+    update = fromRight (error' "updateReportDepth: updating depth should not result in an error")  -- PARTIAL:
+           . updateReportSpecWith (\ropts -> ropts{depth_=clipDepth ropts $ updateDepth (depth_ ropts)})
+    clipDepth _        (DepthSpec Nothing  _) = mempty
+    clipDepth ropts ds@(DepthSpec (Just d) _) | d < 0            = depth_ ropts
+                                              | d >= maxDepth ui = mempty
+                                              | otherwise        = ds
 
 -- | Open the minibuffer, setting its content to the current query with the cursor at the end.
 showMinibuffer :: T.Text -> Maybe String -> UIState -> UIState
@@ -277,43 +339,35 @@ closeMinibuffer = setMode Normal
 setMode :: Mode -> UIState -> UIState
 setMode m ui = ui{aMode=m}
 
--- | Regenerate the content for the current and previous screens, from a new journal and current date.
-regenerateScreens :: Journal -> Day -> UIState -> UIState
-regenerateScreens j d ui@UIState{aScreen=s,aPrevScreens=ss} =
-  -- XXX clumsy due to entanglement of UIState and Screen.
-  -- sInit operates only on an appstate's current screen, so
-  -- remove all the screens from the appstate and then add them back
-  -- one at a time, regenerating as we go.
-  let
-    first:rest = reverse $ s:ss :: [Screen]
-    ui0 = ui{ajournal=j, aScreen=first, aPrevScreens=[]} :: UIState
-
-    ui1 = (sInit first) d False ui0 :: UIState
-    ui2 = foldl' (\ui s -> (sInit s) d False $ pushScreen s ui) ui1 rest :: UIState
-  in
-    ui2
-
 pushScreen :: Screen -> UIState -> UIState
-pushScreen scr ui = ui{aPrevScreens=(aScreen ui:aPrevScreens ui)
-                      ,aScreen=scr
-                      }
+pushScreen scr ui =
+  dbg1Msg ("pushing screen " <> showScreenId scr <> ". " <> showScreenStack "" showScreenId ui1)
+  ui1
+  where ui1 = ui{aPrevScreens=aScreen ui:aPrevScreens ui, aScreen=scr }
 
 popScreen :: UIState -> UIState
-popScreen ui@UIState{aPrevScreens=s:ss} = ui{aScreen=s, aPrevScreens=ss}
+popScreen ui@UIState{aPrevScreens = s : ss} =
+  dbg1Msg ("popping screen " <> showScreenId (aScreen ui) <> ". " <> showScreenStack "" showScreenId ui1)
+  ui1
+  where ui1 = ui{aPrevScreens = ss ,aScreen = s }
 popScreen ui = ui
 
+-- | Reset options to their startup values, discard screen navigation history,
+-- and return to the top screen, regenerating it with the startup options 
+-- and the provided reporting date.
 resetScreens :: Day -> UIState -> UIState
-resetScreens d ui@UIState{aScreen=s,aPrevScreens=ss} =
-  (sInit topscreen) d True $
-  resetOpts $
-  closeMinibuffer ui{aScreen=topscreen, aPrevScreens=[]}
+resetScreens d ui@UIState{astartupopts=origopts, ajournal=j, aScreen=s,aPrevScreens=ss} =
+  ui{aopts=origopts, aPrevScreens=[], aScreen=topscreen', aMode=Normal}
   where
-    topscreen = case ss of _:_ -> last ss
-                           []  -> s
+    topscreen' = screenUpdate origopts d j $ lastDef s ss
 
--- | Enter a new screen, saving the old screen & state in the
--- navigation history and initialising the new screen's state.
-screenEnter :: Day -> Screen -> UIState -> UIState
-screenEnter d scr ui = (sInit scr) d True $
-                       pushScreen scr
-                       ui
+-- | Given a new journal and reporting date, save the new journal in the ui state,
+-- then regenerate the content of all screens in the stack
+-- (using the ui state's current options), preserving the screen navigation history.
+-- Note, does not save the reporting date.
+--
+-- XXX Currently this does not properly regenerate the transaction screen or error screen,
+-- which depend on state from their parent(s); those screens' handlers must do additional work, which is fragile.
+regenerateScreens :: Journal -> Day -> UIState -> UIState
+regenerateScreens j d ui@UIState{aopts=opts, aScreen=s,aPrevScreens=ss} =
+  ui{ajournal=j, aScreen=screenUpdate opts d j s, aPrevScreens=map (screenUpdate opts d j) ss}

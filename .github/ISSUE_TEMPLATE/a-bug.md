@@ -1,25 +1,30 @@
 ---
-name:  A bug
-about: Any problem that seems to be an error or weakness in hledger's software, documentation, marketing, usability...
+name: A bug
+about: A defect in the software, core documentation, user/developer experience, or project
 labels: A BUG
+title: ''
+assignees: ''
 ---
 
-Thank you for helping to make hledger better!
-You can delete this template text before submitting.
+Thanks for helping to make hledger better! Here's how to make a good bug report:
 
-Some things to check before reporting:
+1. Check:
 
-- If you're not sure this is a bug, or if some discussion would help,
-  contact us on chat or the mail list first: https://hledger.org#help-feedback
+- `hledger --version`                  it's best if it's not very old
+- https://hledger.org/install.html     shows the current version and how to upgrade
+- https://hledger.org/hledger.html     the manual (choose your version at top of page)
+  https://hledger.org/hledger-ui.html  
+  https://hledger.org/hledger-web.html
+- https://hledger.org/relnotes.html    recent fixes and upgrade notes
+- https://bugs.hledger.org             bugs already reported
+- https://hledger.org/faq.html         answers to common questions
+- https://hledger.org/support.html     if you have other questions
 
-- Have you looked at (the right version of) the user manual ? 
-  Use `hledger help [--help]` to view the built-in manuals,
-  or view the hledger.org -> USER MANUALS and choose the right version
-  at the top of the page.
+2. In your bug report, please include if possible:
 
-Things that can help us resolve your issue faster:
+- the output of `hledger --version` or (ideal, unless you think it's unneeded) `hledger setup`
+- which operating system you're running on
+- a link to the most relevant doc that you found, if any
+- a small reproducible example or instructions to reproduce.
 
-- A small reproducible example  (--anon can help anonymise data)
-- The output of hledger --version
-- What platform you're on
-- Any related docs that you found
+3. And remove this help text.

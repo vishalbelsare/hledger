@@ -19,10 +19,13 @@ module Hledger.Web.Handler.MiscR
   , getManageR
   , getRobotsR
   , getRootR
+  , getOpenApiR
   ) where
 
-import qualified Data.Map as M
-import qualified Data.Text as T
+import Data.Map qualified as M
+import Data.Text qualified as T
+import Data.Yaml qualified as Yaml
+import Data.ByteString qualified as BS
 import Yesod.Default.Handlers (getFaviconR, getRobotsR)
 
 import Hledger
@@ -38,17 +41,17 @@ getRootR = do
 getManageR :: Handler Html
 getManageR = do
   checkServerSideUiEnabled
-  VD{caps, j} <- getViewData
-  when (CapManage `notElem` caps) (permissionDenied "Missing the 'manage' capability")
+  VD{j} <- getViewData
+  require EditPermission
   defaultLayout $ do
-    setTitle "Manage journal"
+    setTitle "Edit journal"
     $(widgetFile "manage")
 
 getDownloadR :: FilePath -> Handler TypedContent
 getDownloadR f = do
   checkServerSideUiEnabled
-  VD{caps, j} <- getViewData
-  when (CapManage `notElem` caps) (permissionDenied "Missing the 'manage' capability")
+  VD{j} <- getViewData
+  require EditPermission
   (f', txt) <- journalFile404 f j
   addHeader "Content-Disposition" ("attachment; filename=\"" <> T.pack f' <> "\"")
   sendResponse ("text/plain" :: ByteString, toContent txt)
@@ -57,53 +60,63 @@ getDownloadR f = do
 
 getVersionR :: Handler TypedContent
 getVersionR = do
-  VD{caps} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
-  selectRep $ do
-    provideJson $ packageversion
+  require ViewPermission
+  selectRep $ provideJson $ packageversion
 
 getAccountnamesR :: Handler TypedContent
 getAccountnamesR = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
-  selectRep $ do
-    provideJson $ journalAccountNames j
+  VD{j} <- getViewData
+  require ViewPermission
+  selectRep $ provideJson $ journalAccountNames j
 
 getTransactionsR :: Handler TypedContent
 getTransactionsR = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
-  selectRep $ do
-    provideJson $ jtxns j
+  VD{j} <- getViewData
+  require ViewPermission
+  selectRep $ provideJson $ jtxns j
 
 getPricesR :: Handler TypedContent
 getPricesR = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
-  selectRep $ do
+  VD{j} <- getViewData
+  require ViewPermission
+  selectRep $
     provideJson $ map priceDirectiveToMarketPrice $ jpricedirectives j
 
 getCommoditiesR :: Handler TypedContent
 getCommoditiesR = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
+  VD{j} <- getViewData
+  require ViewPermission
   selectRep $ do
-    provideJson $ (M.keys . jinferredcommodities) j
+    provideJson $ (M.keys . jinferredcommoditystyles) j
 
 getAccountsR :: Handler TypedContent
 getAccountsR = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
+  VD{j} <- getViewData
+  require ViewPermission
   selectRep $ do
-    provideJson $ laccounts $ ledgerFromJournal Any j
+    provideJson $
+      styleAmounts (journalCommodityStylesWith HardRounding j) $
+      flattenAccounts $ mapAccounts (accountSetDeclarationInfo j) $ ledgerRootAccount $ ledgerFromJournal Any j
 
 getAccounttransactionsR :: Text -> Handler TypedContent
 getAccounttransactionsR a = do
-  VD{caps, j} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
+  VD{j} <- getViewData
+  require ViewPermission
   let
     rspec = defreportspec
     thisacctq = Acct $ accountNameToAccountRegex a -- includes subs
   selectRep $ do
-    provideJson $ accountTransactionsReport rspec{_rsQuery=Any} j thisacctq
+    provideJson $
+      styleAmounts (journalCommodityStylesWith HardRounding j) $
+      accountTransactionsReport rspec{_rsQuery=Any} j thisacctq
 
+openApiYaml :: BS.ByteString
+openApiYaml = $(embedFileRelative "config/openapi.yaml")
+
+getOpenApiR :: Handler Value
+getOpenApiR =
+  case Yaml.decodeEither' openApiYaml of
+    Left _ -> notFound
+    Right openapi -> do
+      addHeader "Content-Type" "application/json"
+      return openapi

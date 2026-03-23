@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-|
 
@@ -11,7 +10,9 @@ Hledger.Utils.
 module Hledger.Cli.Utils
     (
      unsupportedOutputFormatError,
+     withJournal,
      withJournalDo,
+     withPossibleJournal,
      writeOutput,
      writeOutputLazyText,
      journalTransform,
@@ -21,23 +22,25 @@ module Hledger.Cli.Utils
      openBrowserOn,
      writeFileWithBackup,
      writeFileWithBackupIfChanged,
-     readFileStrictly,
-     pivotByOpts,
-     anonymiseByOpts,
      journalSimilarTransaction,
+     postingsOrTransactionsReportAsText,
      tests_Cli_Utils,
     )
 where
-import Control.Exception as C
 
+import Control.Monad.Except (ExceptT)
+import Control.Monad.IO.Class (liftIO)
 import Data.List
+import Data.List.NonEmpty qualified as NE (toList)
 import Data.Maybe
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.IO as TL
+import Data.Text qualified as T
+import Data.Text.IO qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
+import Data.Text.Lazy.IO qualified as TL
 import Data.Time (Day)
 import Data.Time.Clock.POSIX (POSIXTime, utcTimeToPOSIXSeconds)
+import Lens.Micro ((^.))
 import Safe (readMay, headMay)
 import System.Console.CmdArgs
 import System.Directory (getModificationTime, getDirectoryContents, copyFile, doesFileExist)
@@ -55,6 +58,7 @@ import Hledger.Read
 import Hledger.Reports
 import Hledger.Utils
 import Control.Monad (when)
+import Data.Functor ((<&>))
 
 -- | Standard error message for a bad output format specified with -O/-o.
 unsupportedOutputFormatError :: String -> String
@@ -63,43 +67,68 @@ unsupportedOutputFormatError fmt = "Sorry, output format \""++fmt++"\" is unreco
 -- | Parse the user's specified journal file(s) as a Journal, maybe apply some
 -- transformations according to options, and run a hledger command with it.
 -- Or, throw an error.
-withJournalDo :: CliOpts -> (Journal -> IO a) -> IO a
-withJournalDo opts cmd = do
+withJournal :: CliOpts -> (Journal -> IO a) -> IO a
+withJournal opts cmd = do
   -- We kludgily read the file before parsing to grab the full text, unless
   -- it's stdin, or it doesn't exist and we are adding. We read it strictly
   -- to let the add command work.
   journalpaths <- journalFilePathFromOpts opts
-  files <- readJournalFiles (inputopts_ opts) journalpaths
-  let transformed = journalTransform opts <$> files
-  either error' cmd transformed  -- PARTIAL:
+  j <- runExceptT $ journalTransform opts <$> readJournalFiles (inputopts_ opts) (NE.toList journalpaths)
+  either error' cmd j  -- PARTIAL:
 
--- | Apply some extra post-parse transformations to the journal, if
--- specified by options. These happen after journal validation, but
--- before report calculation. They include:
+{-# DEPRECATED withJournalDo "renamed, please use withJournal instead" #-}
+withJournalDo = withJournal
+
+-- | Like withJournal, but if the first journal file does not exist, provides an empty
+-- journal with that file path set. This is useful for commands like add and import
+-- that need to work with a potentially non-existent first journal file,
+-- while still reading all specified files (for completions, etc).
+withPossibleJournal :: CliOpts -> (Journal -> IO a) -> IO a
+withPossibleJournal opts cmd = do
+  journalpaths <- journalFilePathFromOptsNoDefault opts
+  fs <- case journalpaths of
+    Just paths -> return $ NE.toList paths
+    Nothing -> (:[]) <$> defaultJournalPath
+  j <- runExceptT $ journalTransform opts <$> readPossibleJournalFiles (inputopts_ opts) fs
+  either error' cmd j  -- PARTIAL:
+
+-- | Apply some journal transformations, if enabled by options, that should happen late.
+-- These happen after parsing, finalising the journal, strict checks, and .latest filtering/updating,
+-- but before report calculation. They are, in processing order:
+-- --pivot, --anonymise error message, --obfuscate.
 --
--- - adding forecast transactions (--forecast)
--- - pivoting account names (--pivot)
--- - anonymising (--anonymise).
---
--- This will return an error message if the query in any auto posting rule fails
--- to parse, or the generated transactions are not balanced.
+-- Why not do these in journalFinalise ?
+-- That step is supposed to check the data's intrinsic correctness, regardless of view options;
+-- whereas here we assume correctness and are just transforming the view (based only on InputOpts).
+-- XXX But it's easy to forget to call this. Current callers include withJournal, journalReload, uiReload, withJournalCached.
 journalTransform :: CliOpts -> Journal -> Journal
 journalTransform opts =
-    anonymiseByOpts opts
-  -- - converting amounts to market value (--value)
-  -- . journalApplyValue ropts
-  . pivotByOpts opts
+      maybePivot opts
+  <&> maybeWarnAboutAnon opts
+  <&> maybeObfuscate opts
 
--- | Apply the pivot transformation on a journal, if option is present.
-pivotByOpts :: CliOpts -> Journal -> Journal
-pivotByOpts opts =
+-- | If the --pivot option is present, replace the journal's account names by specified other values.
+maybePivot :: CliOpts -> Journal -> Journal
+maybePivot opts =
   case maybestringopt "pivot" . rawopts_ $ opts of
     Just tag -> journalPivot $ T.pack tag
     Nothing  -> id
 
--- | Apply the anonymisation transformation on a journal, if option is present
-anonymiseByOpts :: CliOpts -> Journal -> Journal
-anonymiseByOpts opts =
+-- #2133
+-- | If the --anon flag is present, raise an informative error.
+maybeWarnAboutAnon :: CliOpts -> Journal -> Journal
+maybeWarnAboutAnon opts =
+  if boolopt "anon" $ rawopts_ opts
+    then error' $ unlines [
+       "--anon does not give privacy, and perhaps should be avoided;"
+      ,"please see https://github.com/simonmichael/hledger/issues/2133 ."
+      ,"For now it has been renamed to --obfuscate (a hidden flag)."
+      ]
+    else id
+
+-- | If the --obfuscate flag is present, apply light obfuscation to the journal data.
+maybeObfuscate :: CliOpts -> Journal -> Journal
+maybeObfuscate opts =
   if anon_ . inputopts_ $ opts
       then anon
       else id
@@ -111,13 +140,14 @@ writeOutput opts s = do
   f <- outputFileFromOpts opts
   (maybe putStr writeFile f) s
 
--- | Write some output to stdout or to a file selected by --output-file.
--- If the file exists it will be overwritten. This function operates on Lazy
--- Text values.
+-- | Write some output, to a file specified by --output-file if any,
+-- otherwise to stdout.
+-- If writing to a file and the file exists, it will be overwritten.
+-- If writing to stdout, a pager is used when appropriate and possible.
 writeOutputLazyText :: CliOpts -> TL.Text -> IO ()
 writeOutputLazyText opts s = do
-  f <- outputFileFromOpts opts
-  (maybe TL.putStr TL.writeFile f) s
+  mf <- outputFileFromOpts opts
+  maybe (runPager . TL.unpack) TL.writeFile mf s
 
 -- -- | Get a journal from the given string and options, or throw an error.
 -- readJournal :: CliOpts -> String -> IO Journal
@@ -127,31 +157,29 @@ writeOutputLazyText opts s = do
 -- them has changed since last read. (If the file is standard input,
 -- this will either do nothing or give an error, not tested yet).
 -- Returns a journal or error message, and a flag indicating whether
--- it was re-read or not.  Like withJournalDo and journalReload, reads
+-- it was re-read or not.  Like withJournal and journalReload, reads
 -- the full journal, without filtering.
-journalReloadIfChanged :: CliOpts -> Day -> Journal -> IO (Either String Journal, Bool)
+journalReloadIfChanged :: CliOpts -> Day -> Journal -> ExceptT String IO (Journal, Bool)
 journalReloadIfChanged opts _d j = do
   let maybeChangedFilename f = do newer <- journalFileIsNewer j f
                                   return $ if newer then Just f else Nothing
-  changedfiles <- catMaybes `fmap` mapM maybeChangedFilename (journalFilePaths j)
-  if not $ null changedfiles
-   then do
-     -- XXX not sure why we use cmdarg's verbosity here, but keep it for now
-     verbose <- isLoud
-     when (verbose || debugLevel >= 6) $ printf "%s has changed, reloading\n" (head changedfiles)
-     ej <- journalReload opts
-     return (ej, True)
-   else
-     return (Right j, False)
+  changedfiles <- liftIO $ catMaybes <$> mapM maybeChangedFilename (journalFilePaths j)
+  case changedfiles of
+    []  -> return (j, False)
+    f:_ -> do
+      -- XXX not sure why we use cmdarg's verbosity here, but keep it for now
+      verbose <- liftIO isLoud
+      when (verbose || debugLevel >= 6) . liftIO $ printf "%s has changed, reloading\n" f
+      newj <- journalReload opts
+      return (newj, True)
 
 -- | Re-read the journal file(s) specified by options, applying any
 -- transformations specified by options. Or return an error string.
 -- Reads the full journal, without filtering.
-journalReload :: CliOpts -> IO (Either String Journal)
+journalReload :: CliOpts -> ExceptT String IO Journal
 journalReload opts = do
-  journalpaths <- dbg6 "reloading files" <$> journalFilePathFromOpts opts
-  files <- readJournalFiles (inputopts_ opts) journalpaths
-  return $ journalTransform opts <$> files
+  journalpaths <- liftIO $ dbg6 "reloading files" <$> journalFilePathFromOpts opts
+  journalTransform opts <$> readJournalFiles (inputopts_ opts) (NE.toList journalpaths)
 
 -- | Has the specified file changed since the journal was last read ?
 -- Typically this is one of the journal's journalFilePaths. These are
@@ -178,16 +206,16 @@ maybeFileModificationTime f = do
 
 -- | Attempt to open a web browser on the given url, all platforms.
 openBrowserOn :: String -> IO ExitCode
-openBrowserOn u = trybrowsers browsers u
+openBrowserOn = trybrowsers browsers
     where
-      trybrowsers (b:bs) u = do
-        (e,_,_) <- readProcessWithExitCode b [u] ""
+      trybrowsers (b:bs) u1 = do
+        (e,_,_) <- readProcessWithExitCode b [u1] ""
         case e of
           ExitSuccess -> return ExitSuccess
-          ExitFailure _ -> trybrowsers bs u
-      trybrowsers [] u = do
+          ExitFailure _ -> trybrowsers bs u1
+      trybrowsers [] u1 = do
         putStrLn $ printf "Could not start a web browser (tried: %s)" $ intercalate ", " browsers
-        putStrLn $ printf "Please open your browser and visit %s" u
+        putStrLn $ printf "Please open your browser and visit %s" u1
         return $ ExitFailure 127
       browsers | os=="darwin"  = ["open"]
                | os=="mingw32" = ["c:/Program Files/Mozilla Firefox/firefox.exe"]
@@ -221,9 +249,6 @@ writeFileWithBackupIfChanged f t = do
 writeFileWithBackup :: FilePath -> String -> IO ()
 writeFileWithBackup f t = backUpFile f >> writeFile f t
 
-readFileStrictly :: FilePath -> IO T.Text
-readFileStrictly f = readFilePortably f >>= \s -> C.evaluate (T.length s) >> return s
-
 -- | Back up this file with a (incrementing) numbered suffix, or give an error.
 backUpFile :: FilePath -> IO ()
 backUpFile fp = do
@@ -248,13 +273,36 @@ backupNumber f g = case g =~ ("^" ++ f ++ "\\.([0-9]+)$") of
 -- Identify the closest recent match for this description in past transactions.
 -- If the options specify a query, only matched transactions are considered.
 journalSimilarTransaction :: CliOpts -> Journal -> T.Text -> Maybe Transaction
-journalSimilarTransaction cliopts j desc = mbestmatch
+journalSimilarTransaction cliopts j desc =
+  fmap fourth4 $ headMay $ journalTransactionsSimilarTo j desc q 0 1
   where
-    mbestmatch = snd <$> headMay bestmatches
-    bestmatches =
-      dbg1With (unlines . ("similar transactions:":) . map (\(score,Transaction{..}) -> printf "%0.3f %s %s" score (show tdate) tdescription)) $
-      journalTransactionsSimilarTo j q desc 10
     q = queryFromFlags $ _rsReportOpts $ reportspec_ cliopts
+
+-- | Render a 'PostingsReport' or 'AccountTransactionsReport' as Text,
+-- determining the appropriate starting widths and increasing as necessary.
+postingsOrTransactionsReportAsText
+    :: Bool -> CliOpts -> (Int -> Int -> (a, [WideBuilder], [WideBuilder]) -> TB.Builder)
+    -> (a -> MixedAmount) -> (a -> MixedAmount) -> [a] -> TB.Builder
+postingsOrTransactionsReportAsText alignAll opts itemAsText itemamt itembal report =
+    mconcat . snd $ mapAccumL renderItem (startWidth amt, startWidth bal) itemsWithAmounts
+  where
+    minWidth  = 12
+    chunkSize = 1000
+
+    renderItem (amtWidth, balWidth) item@(_, amt1, bal1) = ((amtWidth', balWidth'), itemBuilder)
+      where
+        itemBuilder = itemAsText amtWidth' balWidth' item
+        amtWidth' = if alignAll then amtWidth else maximumStrict $ amtWidth : map wbWidth amt1
+        balWidth' = if alignAll then balWidth else maximumStrict $ balWidth : map wbWidth bal1
+
+    startWidth f = maximum $ minWidth : map wbWidth (concatMap f startAlign)
+      where
+        startAlign = (if alignAll then id else take chunkSize) itemsWithAmounts
+
+    itemsWithAmounts = map (\x -> (x, showAmt $ itemamt x, showAmt $ itembal x)) report
+    showAmt = showMixedAmountLinesB oneLineNoCostFmt{displayColour=opts^.color__}
+    amt = second3
+    bal = third3
 
 tests_Cli_Utils = testGroup "Utils" [
 

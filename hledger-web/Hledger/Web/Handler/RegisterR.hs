@@ -10,7 +10,8 @@
 module Hledger.Web.Handler.RegisterR where
 
 import Data.List (intersperse, nub, partition)
-import qualified Data.Text as T
+import Data.Text qualified as T
+import Safe (tailSafe)
 import Text.Hamlet (hamletFile)
 
 import Hledger
@@ -26,26 +27,28 @@ import Hledger.Web.Widget.Common
 getRegisterR :: Handler Html
 getRegisterR = do
   checkServerSideUiEnabled
-  VD{caps, j, m, opts, q, qopts, today} <- getViewData
-  when (CapView `notElem` caps) (permissionDenied "Missing the 'view' capability")
+  VD{perms, j, q, opts, qparam, qopts, today} <- getViewData
+  require ViewPermission
 
   let (a,inclsubs) = fromMaybe ("all accounts",True) $ inAccount qopts
       s1 = if inclsubs then "" else " (excluding subaccounts)"
-      s2 = if m /= Any then ", filtered" else ""
+      s2 = if q /= Any then ", filtered" else ""
       header = a <> s1 <> s2
 
   let rspec = reportspec_ (cliopts_ opts)
       acctQuery = fromMaybe Any (inAccountQuery qopts)
-      acctlink acc = (RegisterR, [("q", replaceInacct q $ accountQuery acc)])
+      acctlink acc = (RegisterR, [("q", replaceInacct qparam $ accountQuery acc)])
       otherTransAccounts =
           map (\(acct,(name,comma)) -> (acct, (T.pack name, T.pack comma))) .
           undecorateLinks . elideRightDecorated 40 . decorateLinks .
-          addCommas . preferReal . otherTransactionAccounts m acctQuery
+          addCommas . preferReal . otherTransactionAccounts q acctQuery
       addCommas xs =
           zip xs $
           zip (map (T.unpack . accountSummarisedName . paccount) xs) $
-          tail $ (", "<$xs) ++ [""]
-      items = accountTransactionsReport rspec{_rsQuery=m} j acctQuery
+          tailSafe (", "<$xs) ++ [""]
+      items =
+        styleAmounts (journalCommodityStylesWith HardRounding j) $
+        accountTransactionsReport rspec{_rsQuery=q} j acctQuery
       balancelabel
         | isJust (inAccount qopts), balanceaccum_ (_rsReportOpts rspec) == Historical = "Historical Total"
         | isJust (inAccount qopts) = "Period Total"
@@ -90,7 +93,7 @@ undecorateLinks xs0@(x:_) =
             let (link, xs1) = span (isJust . fst) xs0
                 (comma, xs2) = span (isNothing . fst) xs1
             in (acct, (map snd link, map snd comma)) : undecorateLinks xs2
-        _ -> error "link name not decorated with account"  -- PARTIAL:
+        _ -> error' "link name not decorated with account"  -- PARTIAL:
 
 decorateLinks :: [(acct, ([char], [char]))] -> [(Maybe acct, char)]
 decorateLinks = concatMap $ \(acct, (name, comma)) ->
@@ -106,14 +109,14 @@ registerChartHtml q title percommoditytxnreports = $(hamletFile "templates/chart
    charttitle = if null title then "" else title ++ ":"
    colorForCommodity = fromMaybe 0 . flip lookup commoditiesIndex
    commoditiesIndex = zip (map fst percommoditytxnreports) [0..] :: [(CommoditySymbol,Int)]
-   simpleMixedAmountQuantity = maybe 0 aquantity . listToMaybe . amounts . mixedAmountStripPrices
-   showZeroCommodity = wbUnpack . showMixedAmountB oneLine{displayPrice=False,displayZeroCommodity=True}
+   simpleMixedAmountQuantity = maybe 0 aquantity . listToMaybe . amounts . mixedAmountStripCosts
+   showZeroCommodity = wbUnpack . showMixedAmountB oneLineNoCostFmt{displayCost=False,displayZeroCommodity=True}
    shownull c = if null c then " " else c
    nodatelink = (RegisterR, [("q", T.unwords $ removeDates q)])
 
-dayToJsTimestamp :: Day -> Integer
-dayToJsTimestamp d =
+-- | Makes a unix timestamp (milliseconds since epoch) corresponding to noon on the given date in UTC.
+dayToUtcNoonTimestamp :: Day -> Integer
+dayToUtcNoonTimestamp d =
   read (formatTime defaultTimeLocale "%s" t) * 1000 -- XXX read
   where
-    t = UTCTime d (secondsToDiffTime 0)
-
+    t = UTCTime d (secondsToDiffTime $ 12 * 60 * 60)

@@ -1,10 +1,10 @@
-# 1. Simple statement works
-hledger -f - incomestatement
-<<<
+# * incomestatement command
+# ** 1. Simple statement works
+<
 2016/1/1
   income  1
   b
->>>
+$ hledger -f - incomestatement
 Income Statement 2016-01-01
 
           || 2016-01-01 
@@ -18,15 +18,12 @@ Income Statement 2016-01-01
  Expenses ||            
 ----------++------------
 ----------++------------
-          ||            
+          ||          0 
 ==========++============
  Net:     ||         -1 
->>>2
->>>= 0
 
-# 2. Period reporting works for a specific year
-hledger -f - incomestatement -b 2016 -e 2017
-<<<
+# ** 2. Period reporting works for a specific year
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -46,7 +43,7 @@ hledger -f - incomestatement -b 2016 -e 2017
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - incomestatement -b 2016 -e 2017
 Income Statement 2016
 
                    ||    2016 
@@ -64,12 +61,9 @@ Income Statement 2016
                    ||  $50.00 
 ===================++=========
  Net:              || $-40.00 
->>>2
->>>= 0
 
-# 3. Period reporting works for two years
-hledger -f - incomestatement -b 2015 -e 2017
-<<<
+# ** 3. Period reporting works for two years
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -89,7 +83,7 @@ hledger -f - incomestatement -b 2015 -e 2017
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - incomestatement -b 2015 -e 2017
 Income Statement 2015-01-01..2016-12-31
 
                    || 2015-01-01..2016-12-31 
@@ -108,12 +102,9 @@ Income Statement 2015-01-01..2016-12-31
                    ||                 $50.00 
 ===================++========================
  Net:              ||              $9,960.00 
->>>2
->>>= 0
 
-# 4. Period reporting works for one month
-hledger -f - incomestatement -b 2015/10 -e 2015/11
-<<<
+# ** 4. Period reporting works for one month
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -133,7 +124,7 @@ hledger -f - incomestatement -b 2015/10 -e 2015/11
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - incomestatement -b 2015/10 -e 2015/11
 Income Statement 2015-10
 
                    ||        Oct 
@@ -147,15 +138,12 @@ Income Statement 2015-10
  Expenses          ||            
 -------------------++------------
 -------------------++------------
-                   ||            
+                   ||          0 
 ===================++============
  Net:              || $10,000.00 
->>>2
->>>= 0
 
-# 5. Period reporting works for one month in another year
-hledger -f - incomestatement -b 2016/10 -e 2016/11
-<<<
+# ** 5. Period reporting works for one month in another year
+<
 2015/10/10 Client A | Invoice #1
     assets:receivables      $10,000.00
     revenue:clients:A      -$10,000.00
@@ -175,7 +163,7 @@ hledger -f - incomestatement -b 2016/10 -e 2016/11
 2016/03/01 Deposit | Invoice #2
     assets:checking             $10.00
     assets:receivables         -$10.00
->>>
+$ hledger -f - incomestatement -b 2016/10 -e 2016/11
 Income Statement 2016-10
 
           || Oct 
@@ -183,18 +171,16 @@ Income Statement 2016-10
  Revenues ||     
 ----------++-----
 ----------++-----
-          ||     
+          ||   0 
 ==========++=====
  Expenses ||     
 ----------++-----
 ----------++-----
-          ||     
+          ||   0 
 ==========++=====
- Net:     ||     
->>>2
->>>= 0
+ Net:     ||   0 
 
-# 6. Multicolumn test
+# ** 6. Multicolumn test
 # old (arithmetic sign):
 # Income Statement
 #
@@ -216,9 +202,8 @@ Income Statement 2016-10
 # ===================++==============================================================================================================================
 #  Total             ||     $-1        0        0        0        0       $1        0        0        0        0        0        0        0        0 
 #
-hledger -f sample.journal incomestatement -p 'monthly in 2008' -AT
->>>
-Income Statement 2008
+$ hledger -f sample.journal incomestatement -p 'monthly in 2008' -AT
+Monthly Income Statement 2008
 
                    || Jan  Feb  Mar  Apr  May  Jun  Jul  Aug  Sep  Oct  Nov  Dec    Total  Average 
 ===================++==============================================================================
@@ -237,9 +222,8 @@ Income Statement 2008
                    ||   0    0    0    0    0   $2    0    0    0    0    0    0       $2        0 
 ===================++==============================================================================
  Net:              ||  $1    0    0    0    0  $-1    0    0    0    0    0    0        0        0 
->>>= 0
 
-# 7. Multicolumn test (historical)
+# ** 7. Multicolumn test (historical)
 # old (arithmetic sign):
 # Income Statement (Historical Ending Balances)
 #
@@ -261,9 +245,8 @@ Income Statement 2008
 # ===================++================================================================================================================================================
 #  Total             ||        $-1         $-1         $-1         $-1         $-1           0           0           0           0           0           0           0 
 #
-hledger -f sample.journal incomestatement -p 'monthly in 2008' --historical
->>>
-Income Statement 2008-01-31..2008-12-31 (Historical Ending Balances)
+$ hledger -f sample.journal incomestatement -p 'monthly in 2008' --historical
+Monthly Income Statement 2008-01-31..2008-12-31 (Historical Ending Balances)
 
                    || 2008-01-31  2008-02-29  2008-03-31  2008-04-30  2008-05-31  2008-06-30  2008-07-31  2008-08-31  2008-09-30  2008-10-31  2008-11-30  2008-12-31 
 ===================++================================================================================================================================================
@@ -282,12 +265,10 @@ Income Statement 2008-01-31..2008-12-31 (Historical Ending Balances)
                    ||          0           0           0           0           0          $2          $2          $2          $2          $2          $2          $2 
 ===================++================================================================================================================================================
  Net:              ||         $1          $1          $1          $1          $1           0           0           0           0           0           0           0 
->>>= 0
 
-# 8. Percentage test
-hledger -f sample.journal incomestatement -p 'quarterly 2008' -T --average -% --no-total
->>>
-Income Statement 2008
+# ** 8. Percentage test
+$ hledger -f sample.journal incomestatement -p 'quarterly 2008' -T --average -% --no-total
+Quarterly Income Statement 2008
 
                    ||  2008Q1   2008Q2  2008Q3  2008Q4    Total  Average 
 ===================++====================================================
@@ -300,23 +281,22 @@ Income Statement 2008
 -------------------++----------------------------------------------------
  expenses:food     ||       0   50.0 %       0       0   50.0 %   50.0 % 
  expenses:supplies ||       0   50.0 %       0       0   50.0 %   50.0 % 
->>>= 0
 
-# 9. With --declared, declared leaf accounts are included, and in the right place.
-hledger -f - incomestatement -N -E --declared
-<<<
+# ** 9. With --declared, declared accounts are included, and in the right place.
+<
 account revenues
 account revenues:aa
 account revenues:ab
 account revenues:ac:aca
 account expenses
->>>
+$ hledger -f - incomestatement -N -E --declared
 Income Statement ..
 
                  || .. 
 =================++====
  Revenues        ||    
 -----------------++----
+ revenues        ||  0 
  revenues:aa     ||  0 
  revenues:ab     ||  0 
  revenues:ac:aca ||  0 
@@ -324,4 +304,54 @@ Income Statement ..
  Expenses        ||    
 -----------------++----
  expenses        ||  0 
->>>= 0
+
+# ** 10. Clipping too far doesn't erase account types (#2434)
+<
+account sm:assets    ; type:A
+account sm:revenues  ; type:R
+
+2025-01-01
+    sm:revenues   -$1
+    sm:assets      $1
+
+2025-01-02
+    sm:revenues   A -2
+    sm:assets     A 2
+
+$ hledger -f - incomestatement -1 -N
+Income Statement 2025-01-01..2025-01-02
+
+          || 2025-01-01..2025-01-02 
+==========++========================
+ Revenues ||                        
+----------++------------------------
+ sm       ||                $1, A 2 
+==========++========================
+ Expenses ||                        
+----------++------------------------
+
+# ** 11. With --declared and --empty, account declaration order is preserved
+<
+account revenues:b
+account revenues:a
+account expenses:y
+account expenses:x
+
+2025-01-01 txn
+    revenues:a      -1
+    expenses:x       1
+
+$ hledger -f - incomestatement -N --empty --declared
+Income Statement 2025-01-01
+
+            || 2025-01-01 
+============++============
+ Revenues   ||            
+------------++------------
+ revenues:b ||          0 
+ revenues:a ||          1 
+============++============
+ Expenses   ||            
+------------++------------
+ expenses:y ||          0 
+ expenses:x ||          1 

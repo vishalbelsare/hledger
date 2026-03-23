@@ -6,8 +6,7 @@
 module Hledger.Utils.Text
   (
   -- * misc
-  -- lowercase,
-  -- uppercase,
+  textCapitalise,
   -- underline,
   -- stripbrackets,
   textUnbracket,
@@ -20,10 +19,10 @@ module Hledger.Utils.Text
   -- quotechars,
   -- whitespacechars,
   escapeDoubleQuotes,
+  escapeBackslash,
   -- escapeSingleQuotes,
   -- escapeQuotes,
   -- words',
-  -- unwords',
   stripquotes,
   -- isSingleQuoted,
   -- isDoubleQuoted,
@@ -53,10 +52,11 @@ where
 
 import Data.Char (digitToInt)
 import Data.Default (def)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
-import qualified Data.Text.Lazy.Builder as TB
+import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Builder qualified as TB
 import Text.DocLayout (charWidth, realLength)
 
 import Test.Tasty (testGroup)
@@ -66,9 +66,8 @@ import Text.Tabular.AsciiWide
 import Text.WideString (WideBuilder(..), wbToText, wbFromText, wbUnpack)
 
 
--- lowercase, uppercase :: String -> String
--- lowercase = map toLower
--- uppercase = map toUpper
+textCapitalise :: Text -> Text
+textCapitalise t = T.toTitle c <> cs where (c,cs) = T.splitAt 1 t
 
 -- stripbrackets :: String -> String
 -- stripbrackets = dropWhile (`elem` "([") . reverse . dropWhile (`elem` "])") . reverse :: String -> String
@@ -140,6 +139,9 @@ whitespacechars = " \t\n\r"
 escapeDoubleQuotes :: T.Text -> T.Text
 escapeDoubleQuotes = T.replace "\"" "\\\""
 
+escapeBackslash :: T.Text -> T.Text
+escapeBackslash = T.replace "\\" "\\\\"
+
 -- escapeSingleQuotes :: T.Text -> T.Text
 -- escapeSingleQuotes = T.replace "'" "\'"
 
@@ -159,26 +161,29 @@ escapeDoubleQuotes = T.replace "\"" "\\\""
 --       singleQuotedPattern = between (char '\'') (char '\'') (many $ noneOf "'")
 --       doubleQuotedPattern = between (char '"') (char '"') (many $ noneOf "\"")
 
--- -- | Quote-aware version of unwords - single-quote strings which contain whitespace
--- unwords' :: [Text] -> Text
--- unwords' = T.unwords . map quoteIfNeeded
-
 -- | Strip one matching pair of single or double quotes on the ends of a string.
 stripquotes :: Text -> Text
 stripquotes s = if isSingleQuoted s || isDoubleQuoted s then T.init $ T.tail s else s
 
 isSingleQuoted :: Text -> Bool
 isSingleQuoted s =
-  T.length (T.take 2 s) == 2 && T.head s == '\'' && T.last s == '\''
+  T.length s >= 2 && T.head s == '\'' && T.last s == '\''
 
 isDoubleQuoted :: Text -> Bool
 isDoubleQuoted s =
-  T.length (T.take 2 s) == 2 && T.head s == '"' && T.last s == '"'
+  T.length s >= 2 && T.head s == '"' && T.last s == '"'
 
+-- | Remove all matching pairs of square brackets and parentheses from the text.
 textUnbracket :: Text -> Text
-textUnbracket s
-    | (T.head s == '[' && T.last s == ']') || (T.head s == '(' && T.last s == ')') = T.init $ T.tail s
-    | otherwise = s
+textUnbracket s = T.drop stripN $ T.dropEnd stripN s
+  where
+    matchBracket :: Char -> Maybe Char
+    matchBracket '(' = Just ')'
+    matchBracket '[' = Just ']'
+    matchBracket _ = Nothing
+
+    expectedClosingBrackets = catMaybes $ takeWhile (/= Nothing) $ matchBracket <$> T.unpack s
+    stripN = length $ takeWhile (uncurry (==)) $ zip expectedClosingBrackets $ reverse $ T.unpack s
 
 -- | Join several multi-line strings as side-by-side rectangular strings of the same height, top-padded.
 -- Treats wide characters as double width.
@@ -206,7 +211,7 @@ fitText mminwidth mmaxwidth ellipsify rightside = clip . pad
     clip s =
       case mmaxwidth of
         Just w
-          | realLength s > w ->
+          | realLength s > max 0 w ->
             if rightside
               then textTakeWidth (w - T.length ellipsis) s <> ellipsis
               else ellipsis <> T.reverse (textTakeWidth (w - T.length ellipsis) $ T.reverse s)
@@ -269,5 +274,22 @@ tests_Text = testGroup "Text" [
      quoteIfSpaced "mimi's cafe" @?= "\"mimi's cafe\""
      quoteIfSpaced "\"alex\" cafe" @?= "\"\\\"alex\\\" cafe\""
      quoteIfSpaced "le'shan's cafe" @?= "\"le'shan's cafe\""
-     quoteIfSpaced "\"be'any's\" cafe" @?= "\"\\\"be'any's\\\" cafe\""
+     quoteIfSpaced "\"be'any's\" cafe" @?= "\"\\\"be'any's\\\" cafe\"",
+   testCase "textUnbracket" $ do
+     textUnbracket "()" @?= ""
+     textUnbracket "(a)" @?= "a"
+     textUnbracket "(ab)" @?= "ab"
+     textUnbracket "[ab]" @?= "ab"
+     textUnbracket "([ab])" @?= "ab"
+     textUnbracket "(()b)" @?= "()b"
+     textUnbracket "[[]b]" @?= "[]b"
+     textUnbracket "[()b]" @?= "()b"
+     textUnbracket "[([]())]" @?= "[]()"
+     textUnbracket "[([[[()]]])]" @?= ""
+     textUnbracket "[([[[(]]])]" @?= "("
+     textUnbracket "[([[[)]]])]" @?= ")",
+   testCase "fitText" $ do
+     fitText Nothing (Just (-2)) True True "" @?= ""
+     fitText Nothing (Just 0) True True "" @?= ""
+     fitText Nothing (Just 6) True True "Test Text" @?= "Test.."
   ]

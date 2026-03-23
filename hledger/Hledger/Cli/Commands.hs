@@ -3,17 +3,26 @@ hledger's built-in commands, and helpers for printing the commands list.
 
 New built-in commands should be added in four places below:
 the export list, the import list, builtinCommands, commandsList.
+
 -}
 
+-- Note: commands list rendering is intensely sensitive to change,
+-- very easy to break in ways that tests currently do not catch.
+
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Hledger.Cli.Commands (
-   findCommand
+   commands
   ,testcmd
   ,builtinCommands
   ,builtinCommandNames
+  ,addonCommandNames
+  ,knownAddonCommandNames
+  ,findBuiltinCommand
+  ,knownCommands
   ,printCommandsList
   ,tests_Hledger_Cli
   ,module Hledger.Cli.Commands.Accounts
@@ -27,6 +36,7 @@ module Hledger.Cli.Commands (
   ,module Hledger.Cli.Commands.Close
   ,module Hledger.Cli.Commands.Codes
   ,module Hledger.Cli.Commands.Commodities
+  ,module Hledger.Cli.Commands.Demo
   ,module Hledger.Cli.Commands.Descriptions
   ,module Hledger.Cli.Commands.Diff
   ,module Hledger.Cli.Commands.Help
@@ -36,27 +46,33 @@ module Hledger.Cli.Commands (
   ,module Hledger.Cli.Commands.Payees
   ,module Hledger.Cli.Commands.Prices
   ,module Hledger.Cli.Commands.Print
-  ,module Hledger.Cli.Commands.Printunique
   ,module Hledger.Cli.Commands.Register
-  ,module Hledger.Cli.Commands.Registermatch
   ,module Hledger.Cli.Commands.Rewrite
+  ,module Hledger.Cli.Commands.Run
+  ,module Hledger.Cli.Commands.Setup
   ,module Hledger.Cli.Commands.Stats
   ,module Hledger.Cli.Commands.Tags
 ) 
 where
 
-import Data.Char (isSpace)
+import Data.Char (isAlphaNum, isSpace, toLower)
+import Data.Either (isRight)
 import Data.List
+import Data.List.Extra (groupSortOn, nubSort)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Time.Calendar
-import System.Environment (withArgs)
+import Safe (headErr)
+import String.ANSI
 import System.Console.CmdArgs.Explicit as C
+import System.Environment (withArgs)
+import System.FilePath (dropExtension, takeBaseName, takeExtension)
 import Test.Tasty (defaultMain)
+import Text.Megaparsec
+import Text.Megaparsec.Char
 
 import Hledger
 import Hledger.Cli.CliOptions
-import Hledger.Cli.Version
 import Hledger.Cli.Commands.Accounts
 import Hledger.Cli.Commands.Activity
 import Hledger.Cli.Commands.Add
@@ -69,6 +85,7 @@ import Hledger.Cli.Commands.Check
 import Hledger.Cli.Commands.Close
 import Hledger.Cli.Commands.Codes
 import Hledger.Cli.Commands.Commodities
+import Hledger.Cli.Commands.Demo
 import Hledger.Cli.Commands.Descriptions
 import Hledger.Cli.Commands.Diff
 import Hledger.Cli.Commands.Files
@@ -79,14 +96,15 @@ import Hledger.Cli.Commands.Notes
 import Hledger.Cli.Commands.Payees
 import Hledger.Cli.Commands.Prices
 import Hledger.Cli.Commands.Print
-import Hledger.Cli.Commands.Printunique
 import Hledger.Cli.Commands.Register
-import Hledger.Cli.Commands.Registermatch
 import Hledger.Cli.Commands.Rewrite
 import Hledger.Cli.Commands.Roi
+import Hledger.Cli.Commands.Run
+import Hledger.Cli.Commands.Setup
 import Hledger.Cli.Commands.Stats
 import Hledger.Cli.Commands.Tags
 import Hledger.Cli.Utils (tests_Cli_Utils)
+import Data.Functor ((<&>))
 
 -- | The cmdargs subcommand mode (for command-line parsing)
 -- and IO action (for doing the command's work) for each builtin command.
@@ -104,8 +122,10 @@ builtinCommands = [
   ,(checkmode              , check)
   ,(closemode              , close)
   ,(codesmode              , codes)
+  ,(commandsmode           , commands)
   ,(commoditiesmode        , commodities)
-  ,(descriptionsmode        , descriptions)
+  ,(demomode               , demo)
+  ,(descriptionsmode       , descriptions)
   ,(diffmode               , diff)
   ,(filesmode              , files)
   ,(helpmode               , help')
@@ -115,15 +135,53 @@ builtinCommands = [
   ,(payeesmode             , payees)
   ,(pricesmode             , prices)
   ,(printmode              , print')
-  ,(printuniquemode        , printunique)
-  ,(registermatchmode      , registermatch)
   ,(registermode           , register)
   ,(rewritemode            , rewrite)
   ,(roimode                , roi)
+  ,(runmode                , runOrReplStub)
+  ,(replmode               , runOrReplStub)
+  ,(setupmode              , setup)
   ,(statsmode              , stats)
   ,(tagsmode               , tags)
   ,(testmode               , testcmd)
   ]
+
+-- figlet -f FONTNAME hledger, then escape backslashes
+_banner_slant = drop 1 [""
+    -----------------------------------------80-------------------------------------
+  ,"    __    __         __               "
+  ,"   / /_  / /__  ____/ /___ ____  _____"
+  ,"  / __ \\/ / _ \\/ __  / __ `/ _ \\/ ___/"
+  ," / / / / /  __/ /_/ / /_/ /  __/ /    "
+  ,"/_/ /_/_/\\___/\\__,_/\\__, /\\___/_/     "
+  ,"                   /____/             "
+  ]
+
+_banner_smslant = drop 1 [""
+  ,"   __   __       __            "
+  ,"  / /  / /__ ___/ /__ ____ ____"
+  ," / _ \\/ / -_) _  / _ `/ -_) __/"
+  ,"/_//_/_/\\__/\\_,_/\\_, /\\__/_/   "
+  ,"                /___/          "
+  ]
+
+_banner_speed = drop 1 [""
+  ,"______ ______    _________                    "
+  ,"___  /____  /__________  /______ _____________"
+  ,"__  __ \\_  /_  _ \\  __  /__  __ `/  _ \\_  ___/"
+  ,"_  / / /  / /  __/ /_/ / _  /_/ //  __/  /    "
+  ,"/_/ /_//_/  \\___/\\__,_/  _\\__, / \\___//_/     "
+  ,"                         /____/               "
+  ]
+
+-- | Choose and apply an accent color for hledger output, if possible
+-- picking one that will contrast with the current terminal background colour.
+accent :: String -> String
+accent
+  | not useColorOnStdoutUnsafe    = id  -- XXX unsafe accenting the title banner - seems to work, even respecting config file
+  | terminalIsLight == Just False = brightWhite
+  | terminalIsLight == Just True  = brightBlack
+  | otherwise                     = id
 
 -- | The commands list, showing command names, standard aliases,
 -- and short descriptions. This is modified at runtime, as follows:
@@ -144,111 +202,270 @@ builtinCommands = [
 -- TODO: generate more of this automatically.
 -- 
 commandsList :: String -> [String] -> [String]
-commandsList progversion othercmds = [
-  -- keep synced with hledger.m4.md -> Commands, commands.m4 -->
+commandsList progversion othercmds =
+  map (bold'.accent) _banner_smslant ++   -- XXX not showing bold, why ?
+  [
+  -- Keep the following synced with:
+  --  commands.m4
+  --  hledger.m4.md -> Commands
+  --  commandsFromCommandsList. Only commands should begin with space or plus.
+  -- IN PARTICULAR KEEP SYNCED WITH commandsListExtractCommands, 
+  -- it needs checking/updating after any wording/layout changes here
    "-------------------------------------------------------------------------------"
   ,progversion
-  ,"Usage: hledger COMMAND [OPTIONS] [-- ADDONCMDOPTIONS]"
-  ,"Commands (+ addons found in $PATH):"
+  ,"Usage: hledger [COMMAND] [OPTIONS] [ARGS]"
+  -- ,"Commands (builtins + addons):"  -- XXX adapt for commands --builtin
+  ,"Commands:"
   ,""
-  ,"Data entry (these commands modify the journal file):"
-  ," add                      add transactions using guided prompts"
-  ,"+iadd                     add transactions using curses ui"
-  ," import                   add any new transactions from other files (eg csv)"
+    -----------------------------------------80-------------------------------------
+  ,bold' "HELP (docs, demos..)"
+  ," commands                 show the commands list (default)"
+  ," demo [DEMO]              show brief demos in the terminal"
+  ," help [-i|-m|-p] [TOPIC]  show the hledger manual with info/man/pager"
+  ," --tldr    [COMMAND]      show command examples   [for command] with tldr"
+  ," --help/-h [COMMAND]      show command line help  [for command]"
+  ," --info    [COMMAND]      show the hledger manual [for command] with info"
+  ," --man     [COMMAND]      show the hledger manual [for command] with man"
+  ,"                          more help: https://hledger.org"
   ,""
-  ,"Data management:"
-  ,"+autosync                 download/deduplicate/convert OFX data"
-  ," check                    check for various kinds of issue in the data"
-  ,"+check-fancyassertions    check more powerful balance assertions"
-  ,"+check-tagfiles           check file paths in tag values exist"
-  ," close                    generate balance-resetting transactions"
-  ," diff                     compare account transactions in two journal files"
-  ,"+interest                 generate interest transactions"
-  ," rewrite                  generate extra postings, similar to print --auto"
-  ,"+stockquotes              download market prices from AlphaVantage"
+    -----------------------------------------80-------------------------------------
+  ,bold' "USER INTERFACES (alternate UIs)"
+  ," repl                     run commands from an interactive prompt"
+  ," run                      run command scripts from files or arguments"
+  ,"+ui                       run a terminal UI (hledger-ui)"
+  ,"+web                      run a web UI (hledger-web)"
+                                                                                     -- see also: MoLe, https://hledger.org/mobile.html
   ,""
-  ,"Financial reports:"
-  ," aregister (areg)         show transactions in a particular account"
-  ," balancesheet (bs)        show assets, liabilities and net worth"
+    -----------------------------------------80-------------------------------------
+  ,bold' "ENTERING DATA (add or edit transactions)"
+  ," add                      add transactions using interactive prompts"
+  ,"+iadd                     add transactions using a TUI (hledger-iadd)"
+  ," import                   add new transactions from other files, eg CSV files"
+  ,"+edit                     edit specific transactions with $EDITOR"               -- hledger-utils
+  ,""
+    -----------------------------------------80-------------------------------------
+  ,bold' "BASIC REPORTS (simple lists)"
+  ," accounts                 show account names"
+  ," codes                    show transaction codes"
+  ," commodities              show commodity/currency symbols"
+  ," descriptions             show transaction descriptions"
+  ," files                    show data files in use"
+  ," notes                    show note part of transaction descriptions"
+  ," payees                   show payee part of transaction descriptions"
+  ," prices                   show historical market prices"
+  ," stats                    show journal statistics"
+  ," tags                     show tag names"
+  ,""
+    -----------------------------------------80-------------------------------------
+  ,bold' "STANDARD REPORTS (the most useful financial reports)"
+  ," print                    show full transaction entries, or export journal data"
+  ," aregister (areg)         show transactions & running balance in one account"
+  ," register (reg)           show postings & running total in one or more accounts"
+  ," balancesheet (bs)        show assets and liabilities"
   ," balancesheetequity (bse) show assets, liabilities and equity"
   ," cashflow (cf)            show changes in liquid assets"
   ," incomestatement (is)     show revenues and expenses"
+  ,""
+    -----------------------------------------80-------------------------------------
+  ,bold' "ADVANCED REPORTS (more versatile/advanced reports)"
+  ," balance (bal)            show balance changes, end balances, gains, budgets.."
+  ,"+lots                     show a commodity's lots"                               -- hledger-lots
   ," roi                      show return on investments"
   ,""
-  ,"Low-level reports:"
-  ," accounts                 show account names"
-  ," activity                 show postings-per-interval bar charts"
-  ," balance (bal)            show balance changes/end balances/budgets in accounts"
-  ," codes                    show transaction codes"
-  ," commodities              show commodity/currency symbols"
-  ," descriptions             show unique transaction descriptions"
-  ," files                    show input file paths"
-  ," notes                    show unique note segments of transaction descriptions"
-  ," payees                   show unique payee segments of transaction descriptions"
-  ," prices                   show market price records"
-  ," print                    show transactions (journal entries)"
-  ," print-unique             show only transactions with unique descriptions"
-  ," register (reg)           show postings in one or more accounts & running total"
-  ," register-match           show a recent posting that best matches a description"
-  ," stats                    show journal statistics"
-  ," tags                     show tag names"
-  ," test                     run self tests"
+    -----------------------------------------80-------------------------------------
+  ,bold' "CHARTS (bar charts, line graphs..)"
+  ," activity                 show posting counts as a bar chart"
+  ,"+bar                      show balances or changes as a bar chart"               -- hledger-bar
+  ,"+plot                     show advanced matplotlib charts as gui/svg/png/pdf.."  -- hledger-utils
   ,""
-  ,"Alternate user interfaces:"
-  ,"+ui                       run terminal UI"
-  ,"+web                      run web UI"
+    -----------------------------------------80-------------------------------------
+  ,bold' "GENERATING DATA (generate or download journal entries; less common)"
+  ,"+autosync                 download/deduplicate/show OFX data as transactions"    -- ledger-autosync
+  ," close                    generate transactions to zero/restore/assert balances"
+  ,"+interest                 generate transactions transferring accrued interest"   -- hledger-interest
+  ,"+lots sell                generate a lot-selling transaction"                    -- hledger-lots
+  ,"+pricehist                download historical market prices"                     -- pricehist
+  ," rewrite                  add postings to transactions, like print --auto"
   ,""
-  ,"Other:"
-  ] ++
-  othercmds
-  ++
-  [""
-  ,"Help:"
-  ," (no arguments)           show this commands list"
-  ," -h                       show general flags"
-  ," COMMAND -h               show flags & docs for COMMAND"
-  ," help [MANUAL]            show hledger manuals in various formats"
+    -----------------------------------------80-------------------------------------
+  ,bold' "MAINTENANCE (error checking, data management..)"
+  ," check                    run any of hledger's built-in correctness checks"
+  ,"+check-fancyassertions    check more powerful balance assertions"                -- hledger-check-fancyassertions
+  ,"+check-tagfiles           check that files referenced in tag values exist"       -- hledger-check-tagfiles
+  ," diff                     compare an account's transactions in two journals"
+  ,"+git                      save or view journal file history simply in git"       -- hledger-git
+  ,"+pijul                    save or view journal file history simply in pijul"     -- hledger-pijul
+  ," setup                    check and show the status of the hledger installation"
+  ," test                     run some self tests"
   ,""
+    -----------------------------------------80-------------------------------------
+  ,bold' "OTHER ADDONS (more hledger-* commands found in PATH):"
   ]
--- edit                     open a text editor on some part of the journal
+  ++ map (' ':) (lines $ multicol 79 othercmds)
+  ++ [""]
 
+-- | Extract just the command names from the default commands list above,
+-- (the first word of lines between "Usage:" and "OTHER" beginning with a space or plus sign),
+-- in the order they occur. With a true first argument, extracts only the addon command names.
+commandsListExtractCommands :: Bool -> [String] -> [String]
+commandsListExtractCommands addonsonly l =
+  [ cmdname | prefixchar:line@(firstchar:_) <- 
+      takeWhile (not . isInfixOf "OTHER") $ dropWhile (not . isInfixOf "Usage:") l
+  , prefixchar `elem` '+':[' '|not addonsonly]
+  , isAlphaNum firstchar
+  , not $ "https://" `isInfixOf` line
+  , let cmdname:_ = words line
+  ]
+  -- Keep synced with commandsList.
 
--- | All names and aliases of builtin commands.
+commandsmode =
+  hledgerCommandMode
+    $(embedFileRelative "Hledger/Cli/Commands/Commands.txt")
+    [flagNone ["builtin"] (setboolopt "builtin")  "show only builtin commands, not addons"
+    ]
+    [(helpflagstitle, helpflags)]
+    []
+    -- flagReq  ["debug"]    (\s opts -> Right $ setopt "debug" s opts) "[N]" "show debug output (levels 1-9, default: 1)"
+
+    ([], Nothing)
+
+-- | Display the commands list.
+commands :: CliOpts -> Journal -> IO ()
+commands opts _ = do
+  addons <- if boolopt "builtin" (rawopts_ opts) then return [] else addonCommandNames
+  printCommandsList prognameandversion addons
+
+{- | Print the commands list, with a pager if appropriate, customising the
+commandsList template above with the given version string and the installed addons.
+Uninstalled known addons will be removed from the list,
+installed known addons will have the + prefix removed,
+and installed unknown addons will be added under Misc.
+-}
+printCommandsList :: String -> [String] -> IO ()
+printCommandsList progversion installedaddons =
+  seq (length $ dbg8 "uninstalledknownaddons" uninstalledknownaddons) $ -- for debug output
+    seq (length $ dbg8 "installedknownaddons" installedknownaddons) $
+      seq (length $ dbg8 "installedunknownaddons" installedunknownaddons) $
+        runPager $
+          unlines $
+            map unplus $
+              filter (not . isuninstalledaddon) $
+                commandsList progversion installedunknownaddons
+ where
+  knownaddons = knownAddonCommandNames
+  uninstalledknownaddons = knownaddons \\ installedaddons
+  installedknownaddons = knownaddons `intersect` installedaddons
+  installedunknownaddons = installedaddons \\ knownaddons
+  unplus ('+' : cs) = ' ' : cs
+  unplus s = s
+  isuninstalledaddon =
+    \case
+      ('+' : l)
+        | cmd `notElem` installedaddons ->
+            dbg9With (const $ "hiding uninstalled addon: " <> cmd) $
+              True
+       where
+        cmd = takeWhile (not . isSpace) l
+      _ -> False
+
+-- | Canonical names of all commands which have a slot in the commands list, in alphabetical order.
+-- These include the builtin commands and the known addon commands.
+knownCommands :: [String]
+knownCommands = nubSort . commandsListExtractCommands False $ commandsList progname []
+
+-- | All names and aliases of the builtin commands.
 builtinCommandNames :: [String]
 builtinCommandNames = concatMap (modeNames . fst) builtinCommands
 
--- | Look up a builtin command's mode and action by exact command name or alias. 
-findCommand :: String -> Maybe (Mode RawOpts, CliOpts -> Journal -> IO ()) 
-findCommand cmdname = find (elem cmdname . modeNames . fst) builtinCommands 
+-- | Look up a builtin command's mode and action by exact command name or alias.
+findBuiltinCommand :: String -> Maybe (Mode RawOpts, CliOpts -> Journal -> IO ()) 
+findBuiltinCommand cmdname = find (elem cmdname . modeNames . fst) builtinCommands 
 
--- | Extract the command names from commandsList: the first word
--- of lines beginning with a space or + sign.
-commandsFromCommandsList :: [String] -> [String]
-commandsFromCommandsList s =
-  [w | c:l <- s, c `elem` [' ','+'], let w:_ = words l]
+{- | Canonical names of the known addon commands which have a slot in the commands list,
+in alphabetical order.
+-}
+knownAddonCommandNames :: [String]
+knownAddonCommandNames = nubSort . commandsListExtractCommands True $ commandsList progname []
 
-knownCommands :: [String]
-knownCommands = sort . commandsFromCommandsList . drop 1 $ commandsList progname []  -- progname will not be seen
+-- Search PATH for names of addon commands, that aren't shadowed by builtin commands.
+addonCommandNames :: IO [String]
+addonCommandNames = installedAddonCommandNames <&> filter (not . (`elem` builtinCommandNames) . dropExtension)
 
--- | Print the commands list, modifying the template above based on
--- the currently available addons. Missing addons will be removed, and
--- extra addons will be added under Misc.
-printCommandsList :: String -> [String] -> IO ()
-printCommandsList progversion addonsFound =
-    putStr . unlines . concatMap adjustline $
-    commandsList progversion (map ('+':) unknownCommandsFound)
-  where
-    commandsFound = map (' ':) builtinCommandNames ++ map ('+':) addonsFound
-    unknownCommandsFound = addonsFound \\ knownCommands
+-- | Get the sorted unique canonical names of hledger addon commands
+-- found in the current user's PATH. These are used in command line
+-- parsing and to display the commands list.
+--
+-- Canonical addon names are the filenames of hledger-* executables in
+-- PATH, without the "hledger-" prefix, and without the file extension
+-- except when it's needed for disambiguation (see below).
+--
+-- When there are exactly two versions of an executable (same base
+-- name, different extensions) that look like a source and compiled
+-- pair (one has .exe, .com, or no extension), the source version will
+-- be excluded (even if it happens to be newer). When there are three
+-- or more versions (or two versions that don't look like a
+-- source/compiled pair), they are all included, with file extensions
+-- intact.
+--
+installedAddonCommandNames :: IO [String]
+installedAddonCommandNames = do
+  -- past bug generator
+  as1 <- hledgerExecutablesInPath                     -- ["hledger-check","hledger-check-dates","hledger-check-dates.hs","hledger-check.hs","hledger-check.py"]
+  let as2 = map stripPrognamePrefix as1               -- ["check","check-dates","check-dates.hs","check.hs","check.py"]
+  let as3 = groupSortOn takeBaseName as2              -- [["check","check.hs","check.py"],["check-dates","check-dates.hs"]]
+  let as4 = concatMap dropRedundantSourceVersion as3  -- ["check","check.hs","check.py","check-dates"]
+  return as4
 
-    adjustline l         | " hledger " `isPrefixOf` l     = [l]
-    adjustline l@('+':_) | cmd `notElem` commandsFound = []
-      where
-        cmd = takeWhile (not . isSpace) l
-    adjustline l = [l]
+stripPrognamePrefix = drop (length progname + 1)
 
+dropRedundantSourceVersion [f,g]
+  | map toLower (takeExtension f) `elem` compiledExts = [f]
+  | map toLower (takeExtension g) `elem` compiledExts = [g]
+dropRedundantSourceVersion fs = fs
 
--- The test command is defined here for easy access to other modules' tests.
+compiledExts = ["",".com",".exe"]
+
+-- | Get the sorted unique filenames of all hledger-* executables in
+-- the current user's PATH. These are files in any of the PATH directories,
+-- named hledger-*, with either no extension (and no periods in the name)
+-- or one of the addonExtensions.
+-- We do not currently filter out non-file objects or files without execute permission.
+hledgerExecutablesInPath :: IO [String]
+hledgerExecutablesInPath = filter isHledgerExeName <$> likelyExecutablesInPath
+
+isHledgerExeName :: String -> Bool
+isHledgerExeName = isRight . parsewith hledgerexenamep . T.pack
+ where
+  hledgerexenamep = do
+    _ <- string $ T.pack progname
+    _ <- char '-'
+    _ <- some $ noneOf ['.']
+    optional (string "." >> choice' (map (string . T.pack) addonExtensions))
+    eof
+
+-- stripAddonExtension :: String -> String
+-- stripAddonExtension = regexReplace re "" where re = "\\.(" ++ intercalate "|" addonExtensions ++ ")$"
+
+addonExtensions :: [String]
+addonExtensions =
+  ["bat"
+  ,"com"
+  ,"exe"
+  ,"hs"
+  ,"js"
+  ,"lhs"
+  ,"lua"
+  ,"php"
+  ,"pl"
+  ,"py"
+  ,"rb"
+  ,"rkt"
+  ,"sh"
+  ,"osh"
+  ,"ysh"
+  ]
+
+-- The test command is also defined here for easy access to other modules' tests.
 
 testmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Test.txt")
@@ -257,9 +474,9 @@ testmode = hledgerCommandMode
   []
   ([], Just $ argsFlag "[-- TASTYOPTS]")
 
--- | The test command, which runs the hledger and hledger-lib
--- packages' unit tests. This command also accepts tasty test runner
--- options, written after a -- (double hyphen).
+-- | The test command, which runs the hledger and hledger-lib packages' unit tests.
+-- Arguments following a -- argument will be passed to the tasty test runner,
+-- and any arguments before -- will be passed as test-selecting -p patterns.
 --
 -- Unlike most hledger commands, this one does not read the user's journal.
 -- A 'Journal' argument remains in the type signature, but it should
@@ -267,7 +484,11 @@ testmode = hledgerCommandMode
 --
 testcmd :: CliOpts -> Journal -> IO ()
 testcmd opts _undefined = do
-  withArgs (listofstringopt "args" $ rawopts_ opts) $
+  let
+    args = listofstringopt "args" $ rawopts_ opts
+    (hledgerargs, tastyargs0) = break (== "--") args
+    tastyargs = dbg1 "tastyargs" $ ["-p " <> a | a <- hledgerargs] ++ drop 1 tastyargs0
+  withArgs tastyargs $
     Test.Tasty.defaultMain $ testGroup "hledger" [
        tests_Hledger
       ,tests_Hledger_Cli
@@ -290,10 +511,10 @@ tests_Commands = testGroup "Commands" [
   ,testGroup "apply account directive" [
      testCase "works" $ do
         let
-          ignoresourcepos j = j{jtxns=map (\t -> t{tsourcepos=nullsourcepos}) (jtxns j)}
+          ignoresourcepos j = j{jtxns=map (\t -> t{tsourcepos=nullsourcepospair}) (jtxns j)}
           sameParse str1 str2 = do
-            j1 <- readJournal definputopts Nothing str1 >>= either error' (return . ignoresourcepos)  -- PARTIAL:
-            j2 <- readJournal definputopts Nothing str2 >>= either error' (return . ignoresourcepos)
+            j1 <- ignoresourcepos <$> readJournal'' str1  -- PARTIAL:
+            j2 <- ignoresourcepos <$> readJournal'' str2  -- PARTIAL:
             j1 @?= j2{jlastreadtime=jlastreadtime j1, jfiles=jfiles j1} --, jparsestate=jparsestate j1}
         sameParse
            ("2008/12/07 One\n  alpha  $-1\n  beta  $1\n" <>
@@ -310,20 +531,20 @@ tests_Commands = testGroup "Commands" [
            )
 
     ,testCase "preserves \"virtual\" posting type" $ do
-      j <- readJournal definputopts Nothing "apply account test\n2008/12/07 One\n  (from)  $-1\n  (to)  $1\n" >>= either error' return  -- PARTIAL:
-      let p = head $ tpostings $ head $ jtxns j
+      j <- readJournal'' "apply account test\n2008/12/07 One\n  (from)  $-1\n  (to)  $1\n"  -- PARTIAL:
+      let p = headErr $ tpostings $ headErr $ jtxns j  -- PARTIAL headErrs succeed because txns & postings provided
       paccount p @?= "test:from"
       ptype p @?= VirtualPosting
     ]
 
   ,testCase "alias directive" $ do
-    j <- readJournal definputopts Nothing "!alias expenses = equity:draw:personal\n1/1\n (expenses:food)  1\n" >>= either error' return  -- PARTIAL:
-    let p = head $ tpostings $ head $ jtxns j
+    j <- readJournal'' "!alias expenses = equity:draw:personal\n1/1\n (expenses:food)  1\n"  -- PARTIAL:
+    let p = headErr $ tpostings $ headErr $ jtxns j  -- PARTIAL headErrs succeed because txns & postings provided
     paccount p @?= "equity:draw:personal:food"
 
   ,testCase "Y default year directive" $ do
-    j <- readJournal definputopts Nothing defaultyear_journal_txt >>= either error' return  -- PARTIAL:
-    tdate (head $ jtxns j) @?= fromGregorian 2009 1 1
+    j <- readJournal'' defaultyear_journal_txt  -- PARTIAL:
+    tdate (headErr $ jtxns j) @?= fromGregorian 2009 1 1  -- PARTIAL headErr succeeds because defaultyear_journal_txt has a txn
 
   ,testCase "ledgerAccountNames" $
     (ledgerAccountNames ledger7)
@@ -355,7 +576,7 @@ tests_Commands = testGroup "Commands" [
 -- t1 = LocalTime date1 midday
 
 {-
-samplejournal = readJournal' sample_journal_str
+samplejournal = readJournal'' sample_journal_str
 
 sample_journal_str = unlines
  ["; A sample journal file."
@@ -556,7 +777,7 @@ journal7 = nulljournal {jtxns =
           [
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 01 01,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -573,7 +794,7 @@ journal7 = nulljournal {jtxns =
           ,
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 02 01,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -590,7 +811,7 @@ journal7 = nulljournal {jtxns =
           ,
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 01 02,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -607,7 +828,7 @@ journal7 = nulljournal {jtxns =
           ,
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 01 03,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -624,7 +845,7 @@ journal7 = nulljournal {jtxns =
           ,
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 01 03,
              tdate2=Nothing,
              tstatus=Unmarked,
@@ -641,7 +862,7 @@ journal7 = nulljournal {jtxns =
           ,
            txnTieKnot Transaction {
              tindex=0,
-             tsourcepos=nullsourcepos,
+             tsourcepos=nullsourcepospair,
              tdate=fromGregorian 2007 01 03,
              tdate2=Nothing,
              tstatus=Unmarked,

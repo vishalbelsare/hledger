@@ -1,79 +1,105 @@
-check\
+## check
+
 Check for various kinds of errors in your data. 
 
-_FLAGS
-
-hledger provides a number of built-in error checks to help
-prevent problems in your data. 
-Some of these are run automatically; or,
-you can use this `check` command to run them on demand,
-with no output and a zero exit code if all is well.
-Specify their names (or a prefix) as argument(s).
-
-Some examples:
-
-```shell
-hledger check      # basic checks
-hledger check -s   # basic + strict checks
-hledger check ordereddates payees  # basic + two other checks
+```flags
+Flags:
+no command-specific flags
 ```
 
-Here are the checks currently available:
+hledger provides a number of built-in correctness checks to help validate your data and prevent errors.
+Some are run automatically, some when you enable `--strict` mode;
+or you can run any of them on demand by providing them as arguments to the `check` command.
+`check` produces no output and a zero exit code if all is well.
+Eg:
+
+```cli
+hledger check                      # run basic checks
+hledger check -s                   # run basic and strict checks
+hledger check ordereddates payees  # run basic checks and two others
+```
+
+If you are an Emacs user, you can also configure flycheck-hledger to run these checks,
+providing instant feedback as you edit the journal.
+
+Here are the checks currently available.
+They are generally checked in the order they are shown here, and only the first failure will be reported.
 
 ### Basic checks
 
-These checks are always run automatically, by (almost) all hledger commands,
-including `check`:
+These important checks are performed by default, by almost all hledger commands:
 
-- **parseable** - data files are well-formed and can be 
-  [successfully parsed](hledger.html#input-files)
+- **parseable** - data files are in a supported [format](#data-formats),
+  with no syntax errors and no invalid include directives.
+  This ensures that all files exist and are readable.
 
-- **balancedwithautoconversion** - all transactions are [balanced](hledger.html#postings),
-  inferring missing amounts where necessary, and possibly converting commodities 
-  using [transaction prices] or automatically-inferred transaction prices
+- **autobalanced** - all transactions are [balanced](#postings),
+  after automatically inferring missing amounts and conversion rates
+  and then converting  amounts to cost.
+  This ensures that each transaction's journal entry is well formed.
 
-- **assertions** - all [balance assertions] in the journal are passing. 
-  (This check can be disabled with `-I`/`--ignore-assertions`.)
+- **assertions** - all balance assertions in the journal are passing.
+  [Balance assertions] are a strong defense against errors, catching many problems.
+  This check is on by default, but if it gets in your way, you can disable it temporarily
+  with `-I`/`--ignore-assertions`, or as a default by adding that flag to your config file.
+  (Then use `-s`/`--strict` or `hledger check assertions` when you want to enable it).
 
 ### Strict checks
 
-These additional checks are run when the `-s`/`--strict` ([strict mode]) flag is used.
-Or, they can be run by giving their names as arguments to `check`:
+When the `-s`/`--strict` flag is used (AKA [strict mode]), all commands will perform the following additional checks (and `assertions`, above).
+These provide extra error-catching power to help you keep your data clean and correct:
 
-- **accounts** - all account names used by transactions 
-  [have been declared](hledger.html#account-error-checking)
+- **balanced** - like `autobalanced`, but implicit conversions between commodities are not allowed;
+  all conversion transactions must use [cost notation](#recording-costs) or [equity postings](#equity-conversion-postings).
+  This prevents wrong conversions caused by typos.
 
-- **commodities** - all commodity symbols used 
-  [have been declared](hledger.html#commodity-error-checking)
+- **commodities** - all commodity symbols used must be [declared](#commodity-error-checking).
+  This guards against mistyping or omitting commodity symbols.
 
-- **balancednoautoconversion** - transactions are balanced, possibly using
-  explicit transaction prices but not [inferred ones](#transaction-prices)
+- **accounts** - all account names used must be [declared](#account-error-checking).
+  This prevents the use of mis-spelled or outdated account names.
 
 ### Other checks
 
-These checks can be run only by giving their names as arguments to `check`.
-They are more specialised and not desirable for everyone, therefore optional:
+These are not wanted by everyone, but can be run using the `check` command:
 
-- **ordereddates** - transactions are ordered by date within each file
+- **tags** - all tags used must be [declared](#tag-directive).
+  This prevents mis-spelled tag names.
+  Note hledger fairly often finds unintended tags in comments.
 
-- **payees** - all payees used by transactions [have been declared](#declaring-payees)
+- **payees** - all payees used in transactions must be [declared](#payee-directive).
+  This will force you to declare any new payee name before using it.
+  Most people will probably find this a bit too strict.
 
-- **uniqueleafnames** - all account leaf names are unique
+- **ordereddates** - within each file, transactions must be ordered by date.
+  This is a simple and effective error catcher. It's not included in strict mode,
+  but you can add it by running `hledger check -s ordereddates`.
+  If enabled, this check is performed before balance assertions.
+
+- **recentassertions** - all accounts with balance assertions must have one that's
+  within the 7 days before their latest posting.
+  This will encourage adding balance assertions for your active asset/liability accounts,
+  which in turn should encourage you to reconcile regularly with those real world balances -
+  another strong defense against errors.
+  ([`hledger close --assert >>$LEDGER_FILE`](#close---assert) is a convenient way to add new balance assertions.
+  Later these become quite redundant, and you might choose to remove them to reduce clutter.)
+
+- **uniqueleafnames** - no two accounts may have the same last account name part
+  (eg the `checking` in `assets:bank:checking`).
+  This ensures each account can be matched by a unique short name, easier to remember and to type.
 
 ### Custom checks
 
-A few more checks are are available as separate [add-on commands],
-in <https://github.com/simonmichael/hledger/tree/master/bin>:
+You can build your own custom checks with [add-on command scripts].
+See also [Cookbook > Scripting](scripting.html).
+Here are some examples from [hledger/bin/](https://github.com/simonmichael/hledger/tree/master/bin):
 
-- **hledger-check-tagfiles** - all tag values containing / (a forward slash) exist as file paths
+- **hledger-check-tagfiles** - all tag values containing `/` exist as file paths
 
 - **hledger-check-fancyassertions** - more complex balance assertions are passing
 
-You could make similar scripts to perform your own custom checks.
-See: Cookbook -> [Scripting](scripting.html).
 
-
-[add-on commands]:    #add-on-commands
+[add-on command scripts]:    #add-on-commands
 [balance assertions]: #balance-assertions
 [strict mode]:        #strict-mode
-[transaction prices]: #transaction-prices
+[costs]: #costs

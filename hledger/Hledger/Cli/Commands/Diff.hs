@@ -18,8 +18,9 @@ import Data.Ord (comparing)
 import Data.Maybe (fromJust)
 import Data.Time (diffDays)
 import Data.Either (partitionEithers)
-import qualified Data.Text.IO as T
-import System.Exit (exitFailure)
+import Data.Text.IO qualified as T
+import Lens.Micro (set)
+import Safe (headDef)
 
 import Hledger
 import Hledger.Cli.CliOptions
@@ -29,7 +30,7 @@ diffmode = hledgerCommandMode
   $(embedFileRelative "Hledger/Cli/Commands/Diff.txt")
   []
   [generalflagsgroup2]
-  []
+  confflags
   ([], Just $ argsFlag "-f FILE1 -f FILE2 FULLACCOUNTTNAME")
 
 data PostingWithPath = PostingWithPath {
@@ -46,7 +47,7 @@ pptxn :: PostingWithPath -> Transaction
 pptxn = fromJust . ptransaction . ppposting
 
 ppamountqty :: PostingWithPath -> Quantity
-ppamountqty = aquantity . head . amounts . pamount . ppposting
+ppamountqty = aquantity . headDef nullamt . amounts . pamount . ppposting
 
 allPostingsWithPath :: Journal -> [PostingWithPath]
 allPostingsWithPath j = do
@@ -80,10 +81,6 @@ matching ppl ppr = do
     (left, right) <- combinedBinBy ppamountqty (ppl, ppr) -- TODO: probably not a correct choice of bins
     greedyMaxMatching $ sortBy (comparing dateCloseness) [ (l,r) | l <- left, r <- right ]
 
-readJournalFile' :: FilePath -> IO Journal
-readJournalFile' fn =
-    readJournalFile definputopts{balancingopts_=defbalancingopts{ignore_assertions_=True}} fn >>= either error' return  -- PARTIAL:
-
 matchingPostings :: AccountName -> Journal -> [PostingWithPath]
 matchingPostings acct j = filter ((== acct) . paccount . ppposting) $ allPostingsWithPath j
 
@@ -98,8 +95,8 @@ unmatchedtxns s pp m =
 -- | The diff command.
 diff :: CliOpts -> Journal -> IO ()
 diff CliOpts{file_=[f1, f2], reportspec_=ReportSpec{_rsQuery=Acct acctRe}} _ = do
-  j1 <- readJournalFile' f1
-  j2 <- readJournalFile' f2
+  j1 <- orDieTrying $ readJournalFile (set ignore_assertions True definputopts) f1
+  j2 <- orDieTrying $ readJournalFile (set ignore_assertions True definputopts) f2
 
   let acct = reString acctRe
   let pp1 = matchingPostings acct j1
@@ -116,6 +113,4 @@ diff CliOpts{file_=[f1, f2], reportspec_=ReportSpec{_rsQuery=Acct acctRe}} _ = d
   putStrLn "These transactions are in the second file only:\n"
   mapM_ (T.putStr . showTransaction) unmatchedtxn2
 
-diff _ _ = do
-  putStrLn "Please specify two input files. Usage: hledger diff -f FILE1 -f FILE2 FULLACCOUNTNAME"
-  exitFailure
+diff _ _ = error' "Please specify two input files. Usage: hledger diff -f FILE1 -f FILE2 FULLACCOUNTNAME"

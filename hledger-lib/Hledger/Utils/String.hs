@@ -3,6 +3,7 @@
 module Hledger.Utils.String (
  takeEnd,
  -- * misc
+ capitalise,
  lowercase,
  uppercase,
  underline,
@@ -10,15 +11,18 @@ module Hledger.Utils.String (
  -- quoting
  quoteIfNeeded,
  singleQuoteIfNeeded,
+ quoteForCommandLine,
  -- quotechars,
  -- whitespacechars,
  words',
- unwords',
  stripAnsi,
  -- * single-line layout
  strip,
  lstrip,
  rstrip,
+ strip1Char,
+ stripBy,
+ strip1By,
  chomp,
  chomp1,
  singleline,
@@ -34,8 +38,9 @@ module Hledger.Utils.String (
 
 
 import Data.Char (isSpace, toLower, toUpper)
-import Data.List (intercalate)
-import qualified Data.Text as T
+import Data.List (intercalate, dropWhileEnd)
+import Data.Text qualified as T
+import Safe (headErr, tailErr)
 import Text.Megaparsec ((<|>), between, many, noneOf, sepBy)
 import Text.Megaparsec.Char (char)
 import Text.Printf (printf)
@@ -52,6 +57,10 @@ takeEnd n l = go (drop n l) l
     go []     r      = r
     go _      []     = []
 
+capitalise :: String -> String
+capitalise (c:cs) = toUpper c : cs
+capitalise s = s
+
 lowercase, uppercase :: String -> String
 lowercase = map toLower
 uppercase = map toUpper
@@ -67,6 +76,25 @@ lstrip = dropWhile isSpace
 -- | Remove trailing whitespace.
 rstrip :: String -> String
 rstrip = reverse . lstrip . reverse
+
+-- | Strip the given starting and ending character
+-- from the start and end of a string if both are present.
+strip1Char :: Char -> Char -> String -> String
+strip1Char b e s = case s of
+  (c:cs) | c==b, not $ null cs, last cs==e -> init cs
+  _ -> s
+
+-- | Strip a run of zero or more characters matching the predicate
+-- from the start and end of a string.
+stripBy :: (Char -> Bool) -> String -> String
+stripBy f = dropWhileEnd f . dropWhile f
+
+-- | Strip a single balanced enclosing pair of a character matching the predicate
+-- from the start and end of a string.
+strip1By :: (Char -> Bool) -> String -> String
+strip1By f s = case s of
+  (c:cs) | f c, not $ null cs, last cs==c -> init cs
+  _ -> s
 
 -- | Remove all trailing newlines/carriage returns.
 chomp :: String -> String
@@ -118,21 +146,49 @@ quoteIfNeeded s | any (`elem` s) (quotechars++whitespacechars++redirectchars) = 
     escapeQuotes (c:cs)   x = showChar c        $ escapeQuotes cs x
 
 -- | Single-quote this string if it contains whitespace or double-quotes.
--- No good for strings containing single quotes.
+-- Does not work for strings containing single quotes.
 singleQuoteIfNeeded :: String -> String
-singleQuoteIfNeeded s | any (`elem` s) (quotechars++whitespacechars) = "'"++s++"'"
+singleQuoteIfNeeded s | any (`elem` s) (quotechars++whitespacechars) = singleQuote s
                       | otherwise = s
 
-quotechars, whitespacechars, redirectchars :: [Char]
+-- | Prepend and append single quotes to a string.
+singleQuote :: String -> String
+singleQuote s = "'"++s++"'"
+
+-- | Try to single- and backslash-quote a string as needed to make it usable
+-- as an argument on a (sh/bash) shell command line. At least, well enough 
+-- to handle common currency symbols, like $. Probably broken in many ways.
+--
+-- >>> quoteForCommandLine "a"
+-- "a"
+-- >>> quoteForCommandLine "\""
+-- "'\"'"
+-- >>> quoteForCommandLine "$"
+-- "'$'"
+--
+quoteForCommandLine :: String -> String
+quoteForCommandLine s
+  | any (`elem` s) (quotechars++whitespacechars++shellchars) = singleQuote $ escapeSingleQuotes s
+  | otherwise = s
+
+-- | Escape single quotes appearing in a string we're protecting by wrapping in single quotes
+escapeSingleQuotes :: String -> String
+escapeSingleQuotes = concatMap escapeSingleQuote
+  where
+    escapeSingleQuote c | c `elem` "'" = ['\\',c]
+    escapeSingleQuote c = [c]
+
+quotechars, whitespacechars, redirectchars, shellchars :: [Char]
 quotechars      = "'\""
 whitespacechars = " \t\n\r"
 redirectchars   = "<>"
+shellchars      = "<>(){}[]$&?#!~`*+\\"
 
 -- | Quote-aware version of words - don't split on spaces which are inside quotes.
 -- NB correctly handles "a'b" but not "''a''". Can raise an error if parsing fails.
 words' :: String -> [String]
 words' "" = []
-words' s  = map stripquotes $ fromparse $ parsewithString p s
+words' s  = map stripquotes $ fromparse $ parsewithString p s  -- PARTIAL
     where
       p = (singleQuotedPattern <|> doubleQuotedPattern <|> patterns) `sepBy` skipNonNewlineSpaces1
           -- eof
@@ -140,18 +196,14 @@ words' s  = map stripquotes $ fromparse $ parsewithString p s
       singleQuotedPattern = between (char '\'') (char '\'') (many $ noneOf "'")
       doubleQuotedPattern = between (char '"') (char '"') (many $ noneOf "\"")
 
--- | Quote-aware version of unwords - single-quote strings which contain whitespace
-unwords' :: [String] -> String
-unwords' = unwords . map quoteIfNeeded
-
 -- | Strip one matching pair of single or double quotes on the ends of a string.
 stripquotes :: String -> String
-stripquotes s = if isSingleQuoted s || isDoubleQuoted s then init $ tail s else s
+stripquotes s = if isSingleQuoted s || isDoubleQuoted s then init $ tailErr s else s  -- PARTIAL tailErr won't fail because isDoubleQuoted
 
-isSingleQuoted s@(_:_:_) = head s == '\'' && last s == '\''
+isSingleQuoted s@(_:_:_) = headErr s == '\'' && last s == '\''  -- PARTIAL headErr, last will succeed because of pattern
 isSingleQuoted _ = False
 
-isDoubleQuoted s@(_:_:_) = head s == '"' && last s == '"'
+isDoubleQuoted s@(_:_:_) = headErr s == '"' && last s == '"'  -- PARTIAL headErr, last will succeed because of pattern
 isDoubleQuoted _ = False
 
 -- Functions below treat wide (eg CJK) characters as double-width.
@@ -185,5 +237,5 @@ strWidth = realLength
 stripAnsi :: String -> String
 stripAnsi s = either err id $ regexReplace ansire "" s
  where
-   err    = error "stripAnsi: invalid replacement pattern"      -- PARTIAL, shouldn't happen
+   err    = errorWithoutStackTrace "stripAnsi: invalid replacement pattern"      -- PARTIAL, shouldn't happen
    ansire = toRegex' $ T.pack "\ESC\\[([0-9]+;)*([0-9]+)?[ABCDHJKfmsu]"  -- PARTIAL, should succeed

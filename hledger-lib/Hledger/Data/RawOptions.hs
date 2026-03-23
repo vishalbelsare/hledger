@@ -9,11 +9,15 @@ more easily by hledger commands/scripts in this and other packages.
 
 module Hledger.Data.RawOptions (
   RawOpts,
+  mkRawOpts,
+  overRawOpts,
+  dropRawOpt,
   setopt,
   setboolopt,
+  unsetboolopt,
   appendopts,
-  inRawOpts,
   boolopt,
+  toggleopt,
   choiceopt,
   collectopts,
   stringopt,
@@ -24,7 +28,8 @@ module Hledger.Data.RawOptions (
   maybeintopt,
   maybeposintopt,
   maybecharopt,
-  overRawOpts
+  maybeynopt,
+  maybeynaopt,
 )
 where
 
@@ -33,6 +38,8 @@ import Data.Default (Default(..))
 import Safe (headMay, lastMay, readDef)
 
 import Hledger.Utils
+import Data.Char (toLower)
+import Data.List (intercalate)
 
 
 -- | The result of running cmdargs: an association list of option names to string values.
@@ -41,7 +48,14 @@ newtype RawOpts = RawOpts { unRawOpts :: [(String,String)] }
 
 instance Default RawOpts where def = RawOpts []
 
+mkRawOpts :: [(String,String)] -> RawOpts
+mkRawOpts = RawOpts
+
+overRawOpts :: ([(String,String)] -> [(String,String)]) -> RawOpts -> RawOpts
 overRawOpts f = RawOpts . f . unRawOpts
+
+dropRawOpt :: String -> RawOpts -> RawOpts
+dropRawOpt a = overRawOpts $ filter (not.(==a).fst)
 
 setopt :: String -> String -> RawOpts -> RawOpts
 setopt name val = overRawOpts (++ [(name, val)])
@@ -49,15 +63,20 @@ setopt name val = overRawOpts (++ [(name, val)])
 setboolopt :: String -> RawOpts -> RawOpts
 setboolopt name = overRawOpts (++ [(name,"")])
 
+unsetboolopt :: String -> RawOpts -> RawOpts
+unsetboolopt name = overRawOpts (filter ((/=name).fst))
+
 appendopts :: [(String,String)] -> RawOpts -> RawOpts
 appendopts new = overRawOpts (++new)
 
--- | Is the named option present ?
-inRawOpts :: String -> RawOpts -> Bool
-inRawOpts name = isJust . lookup name . unRawOpts
-
+-- | Is the named flag present ?
 boolopt :: String -> RawOpts -> Bool
-boolopt = inRawOpts
+boolopt name = isJust . lookup name . unRawOpts
+
+-- | Like boolopt, except if the flag is repeated on the command line it toggles the value.
+-- An even number of repetitions is equivalent to none.
+toggleopt :: String -> RawOpts -> Bool
+toggleopt name rawopts = odd $ length [ n | (n,_) <- unRawOpts rawopts, n==name]
 
 -- | From a list of RawOpts, get the last one (ie the right-most on the command line)
 -- for which the given predicate returns a Just value.
@@ -128,3 +147,20 @@ maybeclippedintopt minVal maxVal name =
                                          ++ " must lie in the range "
                                          ++ show minVal ++ " to " ++ show maxVal
                                          ++ ", but is " ++ show n
+
+maybeynopt :: String -> RawOpts -> Maybe Bool
+maybeynopt name rawopts =
+  case maybestringopt name rawopts of
+    Just v | map toLower v `elem` ["y","yes","always"] -> Just True
+    Just v | map toLower v `elem` ["n","no","never"]   -> Just False
+    Just _ -> error' $ name <> " value should be one of " <> (intercalate ", " ["y","yes","n","no"])
+    _ -> Nothing
+
+maybeynaopt :: String -> RawOpts -> Maybe YNA
+maybeynaopt name rawopts =
+  case maybestringopt name rawopts of
+    Just v | map toLower v `elem` ["y","yes","always"] -> Just Yes
+    Just v | map toLower v `elem` ["n","no","never"]   -> Just No
+    Just v | map toLower v `elem` ["a","auto"]         -> Just Auto
+    Just _ -> error' $ name <> " value should be one of " <> (intercalate ", " ["y","yes","n","no","a","auto"])
+    _ -> Nothing
